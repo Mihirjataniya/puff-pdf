@@ -1,3 +1,6 @@
 .DS_Store
 *.log
 node_modules/
+
+# local push helper (contains a token — never commit)
+PUSH.md
