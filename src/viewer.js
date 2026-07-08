@@ -646,6 +646,14 @@ class PageView {
     ctx.clearRect(0, 0, this.viewport.width, this.viewport.height);
     const s = effectiveScale();
 
+    // read-aloud: highlight the sentence currently being spoken
+    if (this._readRects) {
+      ctx.save();
+      ctx.fillStyle = "rgba(59,130,246,0.28)";
+      for (const r of this._readRects) ctx.fillRect(r.x * s, r.y * s, r.w * s, r.h * s);
+      ctx.restore();
+    }
+
     // highlights first (under everything), composited flat per color so
     // overlapping highlights don't stack into darker patches
     drawGroupedHighlights(ctx, this.annots, s, this);
@@ -1037,6 +1045,137 @@ async function ocrAllPages() {
   state.ocrRunning = false;
   setOcrAllBtn(false);
   toast(state.ocrCancel ? `OCR stopped — ${done} page(s) done.` : `OCR complete — ${done} page(s) recognized.`, 4000);
+}
+
+// ---------- read aloud (SpeechSynthesis) ----------
+const synth = window.speechSynthesis;
+const reader = { active: false, paused: false, pvIndex: 0, pv: null, sentences: [], si: 0, rate: 1, voice: null };
+
+// Build sentences (with on-page rects) from a page's rendered text-layer spans.
+function pageSentences(pv) {
+  const spans = [...pv.textLayer.querySelectorAll("span")];
+  if (!spans.length) return [];
+  const pr = pv.drawCanvas.getBoundingClientRect();
+  const s = effectiveScale();
+  let text = "";
+  const map = [];
+  for (const sp of spans) {
+    const t = sp.textContent;
+    if (!t) continue;
+    const r = sp.getBoundingClientRect();
+    const start = text.length;
+    text += t + " ";
+    map.push({ start, end: text.length, rect: { x: (r.left - pr.left) / s, y: (r.top - pr.top) / s, w: r.width / s, h: r.height / s } });
+  }
+  const sentences = [];
+  const re = /[^.!?]+[.!?]*\s*/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const str = m[0].trim();
+    if (!str) continue;
+    const s0 = m.index, s1 = m.index + m[0].length;
+    const rects = map.filter((mp) => mp.start < s1 && mp.end > s0).map((mp) => mp.rect);
+    sentences.push({ text: str, rects });
+  }
+  return sentences;
+}
+
+function clearReadHighlight() {
+  for (const pv of state.pages) if (pv._readRects) { pv._readRects = null; pv.redraw(); }
+}
+
+function loadReaderPage() {
+  reader.pv = state.pages[reader.pvIndex];
+  reader.sentences = reader.pv ? pageSentences(reader.pv) : [];
+  reader.si = 0;
+}
+
+function startReading() {
+  if (!("speechSynthesis" in window)) { toast("Read-aloud not supported in this browser"); return; }
+  const pv = currentPageView();
+  if (!pv) { toast("Open a PDF first"); return; }
+  synth.cancel();
+  reader.active = true;
+  reader.paused = false;
+  reader.pvIndex = state.pages.indexOf(pv);
+  loadReaderPage();
+  if (!reader.sentences.length) { toast("No text on this page — run OCR first."); reader.active = false; return; }
+  document.getElementById("read-bar").classList.remove("hidden");
+  updateReadUI();
+  speakNextSentence();
+}
+
+async function speakNextSentence() {
+  if (!reader.active) return;
+  if (reader.si >= reader.sentences.length) {           // page done → next page
+    clearReadHighlight();
+    if (reader.pvIndex >= state.pages.length - 1) { stopReading(); toast("Finished reading"); return; }
+    reader.pvIndex++;
+    const pv = state.pages[reader.pvIndex];
+    pv.root.scrollIntoView({ block: "start", behavior: "smooth" });
+    await pv.paint();
+    await new Promise((r) => setTimeout(r, 60)); // let layout settle
+    loadReaderPage();
+    return speakNextSentence();
+  }
+  const sen = reader.sentences[reader.si];
+  clearReadHighlight();
+  reader.pv._readRects = sen.rects;
+  reader.pv.redraw();
+
+  const u = new SpeechSynthesisUtterance(sen.text);
+  u.rate = reader.rate;
+  if (reader.voice) u.voice = reader.voice;
+  u.onend = () => { if (reader.active && !reader.paused) { reader.si++; speakNextSentence(); } };
+  u.onerror = () => { if (reader.active) { reader.si++; speakNextSentence(); } };
+  synth.speak(u);
+}
+
+function toggleReadPause() {
+  if (!reader.active) return;
+  if (reader.paused) { reader.paused = false; synth.resume(); }
+  else { reader.paused = true; synth.pause(); }
+  updateReadUI();
+}
+
+function stopReading() {
+  reader.active = false;
+  reader.paused = false;
+  synth.cancel();
+  clearReadHighlight();
+  document.getElementById("read-bar").classList.add("hidden");
+}
+
+function updateReadUI() {
+  const btn = document.getElementById("rb-play");
+  if (btn) btn.textContent = reader.paused ? "▶" : "⏸";
+}
+
+function wireReadAloud() {
+  const bar = document.getElementById("read-bar");
+  if (!bar) return;
+  document.getElementById("btn-read").addEventListener("click", startReading);
+  document.getElementById("rb-play").addEventListener("click", toggleReadPause);
+  document.getElementById("rb-stop").addEventListener("click", stopReading);
+  document.getElementById("rb-rate").addEventListener("input", (e) => { reader.rate = +e.target.value; });
+
+  const voiceSel = document.getElementById("rb-voice");
+  const fillVoices = () => {
+    const voices = synth.getVoices();
+    if (!voices.length) return;
+    voiceSel.innerHTML = "";
+    voices.forEach((v, i) => {
+      const o = document.createElement("option");
+      o.value = i; o.textContent = `${v.name} (${v.lang})`;
+      voiceSel.appendChild(o);
+    });
+    const en = voices.findIndex((v) => /^en/i.test(v.lang));
+    voiceSel.value = en >= 0 ? en : 0;
+    reader.voice = voices[+voiceSel.value];
+  };
+  fillVoices();
+  if ("speechSynthesis" in window) synth.onvoiceschanged = fillVoices;
+  voiceSel.addEventListener("change", () => { reader.voice = synth.getVoices()[+voiceSel.value]; });
 }
 
 async function loadOcrCache() {
@@ -1602,6 +1741,7 @@ function boot() {
   wireKeyboard();
   wireTooltips();
   wireShapesFlyout();
+  wireReadAloud();
   setTool("pen");
 
   el.stage.addEventListener("scroll", updatePageReadout, { passive: true });

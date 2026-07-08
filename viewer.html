@@ -51,6 +51,7 @@
       <symbol id="i-speech" viewBox="0 0 24 24"><path d="M4 5a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1H9l-4 4v-4H5a1 1 0 0 1-1-1z"/></symbol>
       <symbol id="i-callout" viewBox="0 0 24 24"><path d="M4 4h16v10h-9l-3 4v-4H4z"/></symbol>
       <symbol id="i-tooltip" viewBox="0 0 24 24"><path d="M5 5h14a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1h-5l-2 3-2-3H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z"/></symbol>
+      <symbol id="i-read" viewBox="0 0 24 24"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></symbol>
     </defs>
   </svg>
 
@@ -71,6 +72,7 @@
       <div class="ocr-wrap">
         <button id="btn-ocr" class="btn ghost" data-tip="Recognize text on the current page so a scanned PDF becomes selectable"><svg class="ic"><use href="#i-ocr"/></svg><span>OCR page</span></button>
         <button id="btn-ocr-all" class="btn ghost slim" data-tip="OCR every page (runs in background, cancellable)">All</button>
+        <button id="btn-read" class="btn ghost" data-tip="Read the page aloud (text-to-speech)"><svg class="ic"><use href="#i-read"/></svg><span>Read</span></button>
       </div>
 
       <span class="vr"></span>
@@ -172,6 +174,16 @@
   </div>
 
   <input type="file" id="file-input" accept="application/pdf,.pdf" hidden />
+
+  <!-- read-aloud control bar -->
+  <div id="read-bar" class="hidden">
+    <button id="rb-play" class="icon-btn" title="Play / pause">⏸</button>
+    <button id="rb-stop" class="icon-btn" title="Stop">⏹</button>
+    <label class="rb-field">Speed <input id="rb-rate" type="range" min="0.5" max="2" step="0.1" value="1" /></label>
+    <select id="rb-voice" class="rb-voice" title="Voice"></select>
+    <span class="rb-label"><svg class="ic"><use href="#i-read"/></svg> Reading…</span>
+  </div>
+
   <div id="toast" class="hidden"></div>
 
   <script src="lib/pdf-lib.min.js"></script>
