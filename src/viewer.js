@@ -1,4 +1,4 @@
-// PDF Draw — viewer core
+// Puff PDF — viewer core
 // Stage 2: draw engine (pen, freehand highlighter, line/arrow/rect/ellipse,
 // undo/redo, clear). Text-snap highlight, text box, brush, eraser: Stage 3.
 
@@ -870,7 +870,7 @@ async function onDocLoaded(pdfDoc, docId, label) {
     toast("This PDF is scanned (no text). Click 🔎 OCR to make the current page selectable, or use the freehand highlighter (M).", 6000);
   }
   el.docName.textContent = shortLabel(label);
-  document.title = "PDF Draw — " + shortLabel(label);
+  document.title = "Puff PDF — " + shortLabel(label);
   setTool(state.tool);   // sync tool UI / show the properties bar now a doc is open
 }
 

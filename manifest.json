@@ -1,13 +1,13 @@
 {
   "manifest_version": 3,
-  "name": "PDF Draw — Annotate & Highlight",
+  "name": "Puff PDF — Annotate & Highlight",
   "description": "Draw, highlight, and mark up PDFs in your browser. Export flattened PDFs that work anywhere.",
   "version": "0.1.0",
   "background": {
     "service_worker": "background.js"
   },
   "action": {
-    "default_title": "PDF Draw",
+    "default_title": "Puff PDF",
     "default_popup": "popup.html"
   },
   "permissions": [

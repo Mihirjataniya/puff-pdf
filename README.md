@@ -1,4 +1,4 @@
-# PDF Draw — browser PDF annotator
+# Puff PDF — browser PDF annotator
 
 Draw, highlight, and mark up **any PDF** in your browser, then export a real
 `.pdf` with your markup baked in — it opens correctly in Acrobat, Preview, or
