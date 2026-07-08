@@ -1,0 +1,22 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>
+    body { width: 240px; font: 13px/1.4 system-ui, sans-serif; margin: 0; padding: 12px; background: #1e1e1e; color: #eee; }
+    h1 { font-size: 14px; margin: 0 0 10px; }
+    button { width: 100%; padding: 8px; margin: 4px 0; border: 0; border-radius: 6px; background: #3b82f6; color: #fff; font-size: 13px; cursor: pointer; }
+    button:hover { background: #2563eb; }
+    .hint { color: #999; font-size: 11px; margin-top: 8px; }
+    input[type=file] { display: none; }
+  </style>
+</head>
+<body>
+  <h1>PDF Draw</h1>
+  <button id="open">Open a PDF file…</button>
+  <button id="blank">Open blank viewer</button>
+  <input type="file" id="picker" accept="application/pdf,.pdf" />
+  <div class="hint">Or just navigate to any <b>.pdf</b> link — it opens here automatically.</div>
+  <script src="popup.js"></script>
+</body>
+</html>
