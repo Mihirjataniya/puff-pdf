@@ -16,7 +16,17 @@ function normRect(a, b) {
   return { x: Math.min(a.x, b.x), y: Math.min(a.y, b.y), w: Math.abs(a.x - b.x), h: Math.abs(a.y - b.y) };
 }
 
-export async function exportAnnotatedPdf(pdfBytes, pageAnnots) {
+function dataUrlToBytes(dataUrl) {
+  const bin = atob(String(dataUrl).split(",")[1] || "");
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+
+// `outPages` is one entry per FINAL page in display order:
+//   { blank: boolean, w, h, annots: [...] }
+// Original PDF pages stay in their order; blank pages are inserted at their index.
+export async function exportAnnotatedPdf(pdfBytes, outPages) {
   const { PDFDocument, rgb, StandardFonts, LineCapStyle } = globalThis.PDFLib;
   const pdf = await PDFDocument.load(pdfBytes);
   const fonts = {
@@ -24,17 +34,36 @@ export async function exportAnnotatedPdf(pdfBytes, pageAnnots) {
     serif: await pdf.embedFont(StandardFonts.TimesRoman),
     mono: await pdf.embedFont(StandardFonts.Courier),
   };
+
+  // insert blanks at their final indices (non-blank originals are already in order)
+  outPages.forEach((op, i) => { if (op.blank) pdf.insertPage(i, [op.w, op.h]); });
+
   const pages = pdf.getPages();
   const ctx = { rgb, font: fonts.sans, fonts, cap: LineCapStyle.Round };
 
-  let rotatedWarn = false;
-  for (const { pageNum, annots } of pageAnnots) {
-    const page = pages[pageNum - 1];
-    if (!page) continue;
-    if ((page.getRotation().angle % 360) !== 0) rotatedWarn = true;
-    const ph = page.getSize().height;
-    for (const a of annots) drawOne(page, a, ph, ctx);
+  // embed each unique image once (pdf-lib supports PNG + JPEG)
+  const images = new Map();
+  for (const { annots } of outPages) {
+    for (const a of annots || []) {
+      if (a.type !== "image" || !a.src || images.has(a.src)) continue;
+      try {
+        const bytes = dataUrlToBytes(a.src);
+        const emb = /^data:image\/jpe?g/i.test(a.src) ? await pdf.embedJpg(bytes) : await pdf.embedPng(bytes);
+        images.set(a.src, emb);
+      } catch { /* skip an image that won't embed */ }
+    }
   }
+  ctx.images = images;
+
+  let rotatedWarn = false;
+  outPages.forEach((op, i) => {
+    const page = pages[i];
+    if (!page) return;
+    if ((page.getRotation().angle % 360) !== 0) rotatedWarn = true;
+    if (op.blank) page.drawRectangle({ x: 0, y: 0, width: op.w, height: op.h, color: rgb(1, 1, 1) }); // ensure white
+    const ph = page.getSize().height;
+    for (const a of op.annots || []) drawOne(page, a, ph, ctx);
+  });
   return { bytes: await pdf.save(), rotatedWarn };
 }
 
@@ -125,6 +154,13 @@ function drawOne(page, a, ph, ctx) {
     case "ellipse": {
       const q = normRect(a.points[0], a.points[1]);
       page.drawEllipse({ x: q.x + q.w / 2, y: Y(q.y + q.h / 2), xScale: q.w / 2, yScale: q.h / 2, borderColor: color, borderWidth: a.width || 2, borderOpacity: op });
+      break;
+    }
+    case "image": {
+      const emb = ctx.images && ctx.images.get(a.src);
+      if (emb && a.w > 0 && a.h > 0) {
+        page.drawImage(emb, { x: a.x, y: Y(a.y + a.h), width: a.w, height: a.h, opacity: op });
+      }
       break;
     }
     case "hltext": {

@@ -222,6 +222,16 @@ export function drawAnnotation(ctx, a, s) {
       lines.forEach((ln, i) => ctx.fillText(ln, a.x * s, a.y * s + i * fs * 1.25));
       break;
     }
+    case "image": {
+      // `a._img` is a decoded HTMLImageElement attached (non-enumerable) by the
+      // viewer; if it isn't ready yet the viewer redraws once it loads.
+      const img = a._img;
+      if (img && img.complete && img.naturalWidth) {
+        ctx.globalAlpha = a.opacity ?? 1;
+        ctx.drawImage(img, a.x * s, a.y * s, (a.w || 0) * s, (a.h || 0) * s);
+      }
+      break;
+    }
   }
   ctx.restore();
 }
@@ -318,6 +328,9 @@ export function hitTestAnnot(a, x, y, tol) {
       const r = normRect(a.points[0], a.points[1]);
       // near border OR inside (generous for easy erasing / selecting)
       return x >= r.x - t && x <= r.x + r.w + t && y >= r.y - t && y <= r.y + r.h + t;
+    }
+    case "image": {
+      return x >= a.x - tol && x <= a.x + (a.w || 0) + tol && y >= a.y - tol && y <= a.y + (a.h || 0) + tol;
     }
     case "hltext": {
       for (const q of a.rects || []) {

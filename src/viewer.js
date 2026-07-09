@@ -67,6 +67,7 @@ const el = {
   pages: document.getElementById("pages"),
   dropzone: document.getElementById("dropzone"),
   fileInput: document.getElementById("file-input"),
+  imageInput: document.getElementById("image-input"),
   zoomLabel: document.getElementById("zoom-label"),
   pageReadout: document.getElementById("page-readout"),
   toast: document.getElementById("toast"),
@@ -85,9 +86,10 @@ const el = {
 const TOOL_LABELS = {
   select: "Select", pen: "Pen", brush: "Brush", hltext: "Highlight text",
   hlfree: "Highlighter", line: "Line", arrow: "Arrow", dblarrow: "Double arrow",
-  rect: "Rectangle", rrect: "Rounded rect", ellipse: "Ellipse", text: "Text", eraser: "Eraser",
+  rect: "Rectangle", rrect: "Rounded rect", ellipse: "Ellipse", text: "Text",
+  image: "Image", eraser: "Eraser",
 };
-const NO_WIDTH_TOOLS = new Set(["hltext", "eraser"]);
+const NO_WIDTH_TOOLS = new Set(["hltext", "eraser", "image"]);
 
 // ---------- tiny utils ----------
 let toastTimer = null;
@@ -139,10 +141,267 @@ function annotForTool(pageNum, p) {
   }
 }
 
+// ---------- image annotations ----------
+// Decoded <img> elements, shared by src so duplicates load once. The element is
+// attached to the annot as a NON-ENUMERABLE `_img` so chrome.storage's structured
+// clone (and JSON) skip it — only the serialisable `src` data-URL is persisted.
+const imgCache = new Map();
+let pendingImagePlace = null; // { pv, x, y } — where a picked image will land
+let replaceTarget = null;     // { pv, annot } — image being swapped via the menu
+let imageMenuEl = null;
+let imgDelBtn = null;         // floating ✕ shown on the selected image
+
+// A single ✕ button, re-parented to whichever page holds the selected image and
+// repositioned by redraw(). Deletes the selected image on click.
+function ensureImgDelBtn() {
+  if (imgDelBtn) return imgDelBtn;
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = "img-del";
+  b.textContent = "✕";
+  b.title = "Delete image (Del)";
+  b.setAttribute("aria-label", "Delete image");
+  // swallow the gesture so the canvas underneath doesn't grab/deselect
+  b.addEventListener("pointerdown", (e) => { e.stopPropagation(); e.preventDefault(); });
+  b.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (state.selected && state.selected.annot.type === "image") {
+      deleteAnnot(state.selected.pv, state.selected.annot);
+    }
+  });
+  imgDelBtn = b;
+  return b;
+}
+function hideImgDelBtn() {
+  if (imgDelBtn && imgDelBtn.parentNode) imgDelBtn.parentNode.removeChild(imgDelBtn);
+}
+
+function ensureImage(a, onReady) {
+  if (a._img) return a._img;
+  let img = imgCache.get(a.src);
+  if (!img) {
+    img = new Image();
+    img.decoding = "async";
+    img.src = a.src;
+    imgCache.set(a.src, img);
+  }
+  Object.defineProperty(a, "_img", { value: img, writable: true, configurable: true, enumerable: false });
+  if (!img.complete) img.addEventListener("load", () => onReady && onReady(), { once: true });
+  return img;
+}
+
+function loadImageEl(src) {
+  return new Promise((res, rej) => {
+    const img = new Image();
+    img.onload = () => res(img);
+    img.onerror = () => rej(new Error("could not decode image"));
+    img.src = src;
+  });
+}
+
+// Normalise any picked/dropped image to a PDF-embeddable data URL (PNG, or JPEG
+// when the source is a JPEG), capping the largest side so storage stays sane.
+async function fileToImageSrc(file) {
+  if (!/^image\//i.test(file.type)) throw new Error("not an image file");
+  const objUrl = URL.createObjectURL(file);
+  try {
+    const img = await loadImageEl(objUrl);
+    const w = img.naturalWidth, h = img.naturalHeight;
+    if (!w || !h) throw new Error("empty image");
+    const maxDim = 2400;
+    const k = Math.min(1, maxDim / Math.max(w, h));
+    const cw = Math.max(1, Math.round(w * k)), ch = Math.max(1, Math.round(h * k));
+    const c = document.createElement("canvas");
+    c.width = cw; c.height = ch;
+    c.getContext("2d").drawImage(img, 0, 0, cw, ch);
+    const jpg = /jpe?g/i.test(file.type);
+    const src = jpg ? c.toDataURL("image/jpeg", 0.92) : c.toDataURL("image/png");
+    return { src, ratio: w / h };
+  } finally {
+    URL.revokeObjectURL(objUrl);
+  }
+}
+
+// Place a new image annotation centred on (ux,uy) in unit space, then select it
+// so it's immediately movable/resizable.
+function placeImageAt(pv, ux, uy, src, ratio) {
+  const vp = unitSizeOf(pv);   // works for both pdf and blank pages
+  let w = Math.min(vp.w * 0.4, 260);
+  let h = w / (ratio || 1);
+  if (h > vp.h * 0.6) { h = vp.h * 0.6; w = h * (ratio || 1); }
+  let x = ux - w / 2, y = uy - h / 2;
+  x = Math.max(0, Math.min(x, vp.w - w));
+  y = Math.max(0, Math.min(y, vp.h - h));
+  const annot = { id: newId(), page: pv.pageNum, type: "image", src, x, y, w, h, opacity: state.opacity };
+  commit({ added: [{ pv, annot }], removed: [] });
+  ensureImage(annot, () => pv.redraw());
+  state.selected = { pv, annot };
+  state.drag = null;
+  pv.redraw();
+}
+
+// Swap the picture of an existing image (undoable as remove-old + add-new).
+function applyImageReplace(src, ratio) {
+  const target = replaceTarget; replaceTarget = null;
+  if (!target) return;
+  const { pv, annot } = target;
+  const idx = pv.annots.indexOf(annot);
+  if (idx < 0) return;
+  const updated = { ...annot, id: newId(), src, h: annot.w / (ratio || 1) }; // keep width, fix aspect
+  pv.annots.splice(idx, 1, updated);                                          // _img is non-enumerable → not copied
+  state.history.push({ added: [{ pv, annot: updated }], removed: [{ pv, annot }] });
+  state.redo.length = 0;
+  scheduleSave();
+  ensureImage(updated, () => pv.redraw());
+  state.selected = { pv, annot: updated };
+  pv.redraw();
+}
+
+function deleteAnnot(pv, annot) {
+  if (!pv.annots.includes(annot)) return;
+  pv.annots = pv.annots.filter((a) => a !== annot);
+  commit({ added: [], removed: [{ pv, annot }] });
+  if (state.selected && state.selected.annot === annot) { state.selected = null; state.drag = null; }
+  pv.redraw();
+}
+
+// Double-click menu for an image: replace the picture or delete it.
+function closeImageMenu() {
+  if (!imageMenuEl) return;
+  imageMenuEl.remove();
+  imageMenuEl = null;
+  document.removeEventListener("pointerdown", onDocDownForMenu, true);
+}
+function onDocDownForMenu(e) {
+  if (imageMenuEl && !imageMenuEl.contains(e.target)) closeImageMenu();
+}
+function openImageMenu(pv, annot, clientX, clientY) {
+  closeImageMenu();
+  const m = document.createElement("div");
+  m.className = "img-menu";
+  const rep = document.createElement("button");
+  rep.textContent = "Replace image";
+  const del = document.createElement("button");
+  del.className = "danger";
+  del.textContent = "Delete";
+  m.append(rep, del);
+  document.body.appendChild(m);
+  m.style.left = Math.max(6, Math.min(clientX, window.innerWidth - m.offsetWidth - 8)) + "px";
+  m.style.top = Math.max(6, Math.min(clientY, window.innerHeight - m.offsetHeight - 8)) + "px";
+  rep.addEventListener("click", () => { replaceTarget = { pv, annot }; closeImageMenu(); el.imageInput.click(); });
+  del.addEventListener("click", () => { closeImageMenu(); deleteAnnot(pv, annot); });
+  imageMenuEl = m;
+  setTimeout(() => document.addEventListener("pointerdown", onDocDownForMenu, true), 0);
+}
+
+// Map a client point to the page under it (only painted pages have a live rect).
+function pageAtClient(cx, cy) {
+  for (const pv of state.pages) {
+    const r = pv.drawCanvas.getBoundingClientRect();
+    if (r.width && cx >= r.left && cx <= r.right && cy >= r.top && cy <= r.bottom) {
+      const s = effectiveScale();
+      return { pv, x: (cx - r.left) / s, y: (cy - r.top) / s };
+    }
+  }
+  return null;
+}
+
+function defaultPlaceTarget() {
+  const pv = currentPageView();
+  if (!pv) return null;
+  const { w, h } = unitSizeOf(pv);
+  return { pv, x: w / 2, y: h / 2 };
+}
+
+// ---------- blank pages ----------
+let blankSeq = 0; // monotonic counter for blank-page uids ("b1", "b2", …)
+
+// A page's size in unit space (PDF points at scale 1).
+function unitSizeOf(pv) {
+  if (pv.kind === "blank") return { w: pv.blankSize.w, h: pv.blankSize.h };
+  const vp = pv.pdfPage.getViewport({ scale: 1 });
+  return { w: vp.width, h: vp.height };
+}
+
+function makeBlankPageView(size, uid) {
+  const pv = new PageView(0);
+  pv.kind = "blank";
+  pv.blankSize = { w: size.w, h: size.h };
+  pv.uid = uid || ("b" + (++blankSeq));
+  addBlankChrome(pv);
+  return pv;
+}
+
+// Centered "Blank page" hint + hover "Remove page" button (hidden once the page
+// has annotations so it never covers the user's marks).
+function addBlankChrome(pv) {
+  const box = document.createElement("div");
+  box.className = "blank-chrome";
+  const label = document.createElement("span");
+  label.className = "blank-label";
+  label.textContent = "Blank page";
+  const rm = document.createElement("button");
+  rm.type = "button";
+  rm.className = "blank-remove";
+  rm.textContent = "✕ Remove page";
+  rm.title = "Remove this blank page";
+  rm.addEventListener("click", (e) => { e.stopPropagation(); removeBlankPage(pv); });
+  box.append(label, rm);
+  pv.root.appendChild(box);
+  pv.blankChrome = box;
+}
+
+function removeBlankPage(pv) {
+  const idx = state.pages.indexOf(pv);
+  if (idx < 0 || pv.kind !== "blank") return;
+  if (state.io) state.io.unobserve(pv.root);
+  state.visible.delete(pv);
+  if (state.selected && state.selected.pv === pv) { state.selected = null; state.drag = null; }
+  state.pages.splice(idx, 1);
+  pv.root.remove();
+  renumberPages();
+  scheduleSave();
+  updatePageReadout();
+  toast("Blank page removed");
+}
+
+// Renumber pages by array order and refresh the page count / annot.page fields.
+function renumberPages() {
+  state.numPages = state.pages.length;
+  state.pages.forEach((pv, i) => {
+    pv.pageNum = i + 1;
+    pv.root.dataset.page = String(i + 1);
+    for (const a of pv.annots) a.page = i + 1;
+  });
+}
+
+// Insert a blank page (sized like its neighbour) directly after `refPv`.
+function insertBlankPageAfter(refPv) {
+  const idx = state.pages.indexOf(refPv);
+  if (idx < 0) return;
+  const pv = makeBlankPageView(unitSizeOf(refPv));
+  state.pages.splice(idx + 1, 0, pv);
+  refPv.root.after(pv.root);
+  pv.root.__pv = pv;
+  if (state.io) state.io.observe(pv.root);
+  renumberPages();
+  pv.layout(effectiveScale());
+  pv.paint();
+  state.visible.add(pv);
+  pv.root.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  scheduleSave();
+  updatePageReadout();
+  toast(`Blank page added — now page ${pv.pageNum} of ${state.numPages}`);
+}
+
 // ---------- a single rendered page ----------
 class PageView {
   constructor(pageNum) {
     this.pageNum = pageNum;
+    this.kind = "pdf";      // "pdf" (backed by pdfPage) or "blank"
+    this.uid = null;        // stable id for persistence: "p<srcIndex>" or "b<n>"
+    this.srcIndex = null;   // pdf: 0-based index in the ORIGINAL document
+    this.blankSize = null;  // blank: { w, h } in unit points
     this.pdfPage = null;
     this.viewport = null;
     this.annots = [];
@@ -162,7 +421,20 @@ class PageView {
     this.drawCanvas = document.createElement("canvas");
     this.drawCanvas.className = "draw-canvas";
 
-    this.root.append(this.pdfCanvas, this.textLayer, this.drawCanvas);
+    // hover "＋ Blank page" control living in the gap below the page
+    this.insertBar = document.createElement("div");
+    this.insertBar.className = "page-insert";
+    const line = document.createElement("span");
+    line.className = "page-insert-line";
+    const pill = document.createElement("button");
+    pill.type = "button";
+    pill.className = "page-insert-pill";
+    pill.textContent = "＋ Blank page";
+    pill.title = "Insert a blank page here";
+    pill.addEventListener("click", (e) => { e.stopPropagation(); insertBlankPageAfter(this); });
+    this.insertBar.append(line, pill);
+
+    this.root.append(this.pdfCanvas, this.textLayer, this.drawCanvas, this.insertBar);
     this.wirePointer();
   }
 
@@ -186,9 +458,15 @@ class PageView {
   }
 
   onDown(e) {
+    if (imageMenuEl) closeImageMenu();
+    // a freshly placed / selected image can be moved or resized under ANY tool
+    if (state.selected && state.selected.pv === this && state.selected.annot.type === "image") {
+      if (this.tryGrabSelection(e)) return;
+    }
     if (state.tool === "hltext") return;                 // native text selection
     if (state.tool === "select") { this.selectDown(e); return; }
     if (state.tool === "eraser") { this.eraseAt(e); return; }
+    if (state.tool === "image") { this.imageDown(e); return; }
     if (state.tool === "text") {
       if (this.tryGrabSelection(e)) return;              // move/resize the selected text box
       // clicking an existing text box selects it (single = move, double = edit); empty = new box
@@ -268,6 +546,26 @@ class PageView {
     this.redraw();
   }
 
+  // Image tool: click an existing image to select/move it, else open the OS file
+  // picker and drop the chosen picture where you clicked.
+  imageDown(e) {
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    if (this.tryGrabSelection(e)) return;                // grab handles/body of the selected image
+    const p = this.toUnit(e);
+    const tol = 6 / effectiveScale();
+    const hitImg = [...this.annots].reverse().find((a) => a.type === "image" && bboxContains(annotBBox(a), p, tol));
+    if (hitImg) {
+      state.selected = { pv: this, annot: hitImg };
+      state.drag = { mode: "move", last: p, before: snapshotGeom(hitImg) };
+      this.drawCanvas.setPointerCapture(e.pointerId);
+      this.redraw();
+      return;
+    }
+    if (state.selected) { const pv = state.selected.pv; state.selected = null; state.drag = null; pv.redraw(); }
+    pendingImagePlace = { pv: this, x: p.x, y: p.y };    // consumed by the image-input change handler
+    el.imageInput.click();
+  }
+
   // If the current selection is on this page and the pointer lands on one of
   // its handles or body, begin a resize/move gesture. Returns true if grabbed.
   // Works under ANY tool, so a shape can be adjusted right after drawing it.
@@ -338,7 +636,9 @@ class PageView {
   // cheap: size the page box (placeholder) at the current scale — no canvas work
   layout(scale) {
     this.scale = scale;
-    const vp = this.pdfPage.getViewport({ scale });
+    const vp = this.kind === "blank"
+      ? { width: this.blankSize.w * scale, height: this.blankSize.h * scale }
+      : this.pdfPage.getViewport({ scale });
     this.viewport = vp;
     this.root.style.width = Math.floor(vp.width) + "px";
     this.root.style.height = Math.floor(vp.height) + "px";
@@ -349,6 +649,7 @@ class PageView {
   // pages near the viewport (lazy rendering — 298 pages won't all paint at once).
   async paint() {
     if (!this.viewport) return;
+    if (this.kind === "blank") { this.paintBlank(); return; }
     if (this._painting) return;
     if (this._painted && this._paintedScale === this.scale) return;
     this._painting = true;
@@ -384,6 +685,20 @@ class PageView {
     } finally {
       this._painting = false;
     }
+  }
+
+  // blank page: no PDF/text to render — just size the draw layer (the white .page
+  // background shows through) and paint any annotations onto it.
+  paintBlank() {
+    if (this._painted && this._paintedScale === this.scale) return;
+    const w = Math.floor(this.viewport.width), h = Math.floor(this.viewport.height);
+    this.drawCanvas.width = Math.floor(w * DPR);
+    this.drawCanvas.height = Math.floor(h * DPR);
+    this.drawCanvas.style.width = w + "px";
+    this.drawCanvas.style.height = h + "px";
+    this.redraw();
+    this._painted = true;
+    this._paintedScale = this.scale;
   }
 
   // free the pixel buffers of an off-screen page to cap memory (keeps placeholder)
@@ -635,6 +950,15 @@ class PageView {
     if (state.tool === "hltext") return;
     const p = this.toUnit(e);
     const tol = 6 / effectiveScale();
+    const hitImg = [...this.annots].reverse().find((a) => a.type === "image" && bboxContains(annotBBox(a), p, tol));
+    if (hitImg) {
+      e.preventDefault();
+      state.selected = { pv: this, annot: hitImg };
+      state.drag = null;
+      this.redraw();
+      openImageMenu(this, hitImg, e.clientX, e.clientY);
+      return;
+    }
     const hit = [...this.annots].reverse().find((a) => a.type === "text" && (hitTestAnnot(a, p.x, p.y, tol) || bboxContains(annotBBox(a), p, tol)));
     if (hit) { e.preventDefault(); this.editTextBox(hit); }
   }
@@ -654,12 +978,31 @@ class PageView {
       ctx.restore();
     }
 
+    // kick off decoding of any image annots; each redraws this page when ready
+    for (const a of this.annots) if (a.type === "image") ensureImage(a, () => this.redraw());
+
     // highlights first (under everything), composited flat per color so
     // overlapping highlights don't stack into darker patches
     drawGroupedHighlights(ctx, this.annots, s, this);
     for (const a of this.annots) if (a.type !== "hltext" && a.type !== "hlfree") drawAnnotation(ctx, a, s);
     if (this.live) drawAnnotation(ctx, this.live, s);
     if (state.selected && state.selected.pv === this) drawSelectionChrome(ctx, state.selected.annot, s);
+
+    // floating ✕ delete button, top-right of a selected image (offset clear of the handle)
+    if (state.selected && state.selected.pv === this && state.selected.annot.type === "image") {
+      const a = state.selected.annot;
+      const b = ensureImgDelBtn();
+      if (b.parentNode !== this.root) this.root.appendChild(b);
+      b.style.left = ((a.x + a.w) * s + 4) + "px";
+      b.style.top = (a.y * s - 24) + "px";
+    } else if (imgDelBtn && imgDelBtn.parentNode === this.root) {
+      hideImgDelBtn();
+    }
+
+    // blank pages: show the "Blank page / Remove" hint only while empty
+    if (this.kind === "blank" && this.blankChrome) {
+      this.blankChrome.style.display = this.annots.length ? "none" : "flex";
+    }
   }
 }
 
@@ -727,9 +1070,14 @@ function clearCurrentPage() {
 function storageKey() { return "pdfdraw:" + state.docId; }
 
 function serialize() {
-  const pages = {};
-  for (const pv of state.pages) if (pv.annots.length) pages[pv.pageNum] = pv.annots;
-  return { v: 1, savedAt: Date.now(), label: state.sourceLabel, pages };
+  // v2: full page order (incl. inserted blanks) + annots keyed by STABLE uid, so
+  // inserting/removing pages never mis-maps saved markup on reload.
+  const order = state.pages.map((pv) => pv.kind === "blank"
+    ? { uid: pv.uid, kind: "blank", w: pv.blankSize.w, h: pv.blankSize.h }
+    : { uid: pv.uid, kind: "pdf", srcIndex: pv.srcIndex });
+  const annots = {};
+  for (const pv of state.pages) if (pv.annots.length) annots[pv.uid] = pv.annots;
+  return { v: 2, savedAt: Date.now(), label: state.sourceLabel, order, annots };
 }
 
 async function saveAnnots(manual) {
@@ -755,35 +1103,71 @@ async function loadAnnots() {
     const got = await api.storage.local.get(storageKey());
     stored = got[storageKey()];
   } catch { return; }
-  if (!stored || !stored.pages) return;
-  let count = 0;
-  for (const pv of state.pages) {
-    const arr = stored.pages[pv.pageNum];
-    if (Array.isArray(arr)) { pv.annots = arr; count += arr.length; pv.redraw(); }
+  if (!stored) return;
+
+  let count = 0, blanks = 0;
+  if (stored.v === 2 && Array.isArray(stored.order)) {
+    // rebuild the page order, recreating any saved blank pages
+    const pdfByUid = new Map(state.pages.map((pv) => [pv.uid, pv]));
+    const order = [];
+    let maxBlank = 0;
+    for (const e of stored.order) {
+      if (e.kind === "blank") {
+        order.push(makeBlankPageView({ w: e.w, h: e.h }, e.uid));
+        blanks++;
+        const n = parseInt(String(e.uid).replace(/^b/, ""), 10);
+        if (Number.isFinite(n)) maxBlank = Math.max(maxBlank, n);
+      } else {
+        const pv = pdfByUid.get(e.uid) || pdfByUid.get("p" + e.srcIndex);
+        if (pv) order.push(pv);
+      }
+    }
+    for (const pv of state.pages) if (!order.includes(pv)) order.push(pv); // safety: keep any missing pdf pages
+    blankSeq = Math.max(blankSeq, maxBlank);
+    state.pages = order;
+    el.pages.replaceChildren(...order.map((pv) => pv.root));
+    for (const pv of state.pages) {
+      const arr = stored.annots && stored.annots[pv.uid];
+      if (Array.isArray(arr)) { pv.annots = arr; count += arr.length; }
+    }
+    renumberPages();
+  } else if (stored.pages) {
+    // v1: annots keyed by original pageNum (no blanks existed) → map by position
+    for (const pv of state.pages) {
+      const arr = stored.pages[pv.pageNum];
+      if (Array.isArray(arr)) { pv.annots = arr; count += arr.length; }
+    }
   }
-  if (count) toast(`Restored ${count} saved annotation${count > 1 ? "s" : ""}`);
+
+  if (count || blanks) {
+    const parts = [];
+    if (count) parts.push(`${count} annotation${count > 1 ? "s" : ""}`);
+    if (blanks) parts.push(`${blanks} blank page${blanks > 1 ? "s" : ""}`);
+    toast(`Restored ${parts.join(" + ")}`);
+  }
 }
 
 // ---------- export flattened PDF ----------
-function pageAnnotSnapshot() {
-  return state.pages
-    .filter((pv) => pv.annots.length)
-    .map((pv) => {
-      // merge text highlights per color so the exported PDF matches the screen
-      const groups = new Map();
-      for (const a of pv.annots) {
-        if (a.type !== "hltext") continue;
-        const k = `${a.color}|${a.opacity}`;
-        let g = groups.get(k);
-        if (!g) { g = { color: a.color, opacity: a.opacity, rects: [] }; groups.set(k, g); }
-        for (const r of a.rects || []) g.rects.push({ ...r });
-      }
-      const mergedHl = [...groups.values()].map((g) => ({
-        type: "hltext", page: pv.pageNum, color: g.color, opacity: g.opacity, rects: mergeLineRects(g.rects),
-      }));
-      const others = pv.annots.filter((a) => a.type !== "hltext");
-      return { pageNum: pv.pageNum, annots: [...mergedHl, ...others] };
-    });
+// One entry per output page IN DISPLAY ORDER (every page, so the exporter can place
+// inserted blanks at the right indices). `blank` pages carry their size.
+function buildOutPages() {
+  return state.pages.map((pv) => {
+    // merge text highlights per color so the exported PDF matches the screen
+    const groups = new Map();
+    for (const a of pv.annots) {
+      if (a.type !== "hltext") continue;
+      const k = `${a.color}|${a.opacity}`;
+      let g = groups.get(k);
+      if (!g) { g = { color: a.color, opacity: a.opacity, rects: [] }; groups.set(k, g); }
+      for (const r of a.rects || []) g.rects.push({ ...r });
+    }
+    const mergedHl = [...groups.values()].map((g) => ({
+      type: "hltext", color: g.color, opacity: g.opacity, rects: mergeLineRects(g.rects),
+    }));
+    const others = pv.annots.filter((a) => a.type !== "hltext");
+    const size = unitSizeOf(pv);
+    return { blank: pv.kind === "blank", w: size.w, h: size.h, annots: [...mergedHl, ...others] };
+  });
 }
 
 function exportName() {
@@ -805,11 +1189,12 @@ function downloadBytes(bytes, name) {
 
 async function exportPdf() {
   if (!state.pdfBytes) { toast("Open a PDF first"); return; }
-  const snap = pageAnnotSnapshot();
-  if (!snap.length) { toast("Nothing to export yet — draw something"); return; }
+  const outPages = buildOutPages();
+  const hasMarkup = outPages.some((op) => op.blank || op.annots.length);
+  if (!hasMarkup) { toast("Nothing to export yet — draw something or add a page"); return; }
   toast("Building PDF…", 60000);
   try {
-    const { bytes, rotatedWarn } = await exportAnnotatedPdf(state.pdfBytes, snap);
+    const { bytes, rotatedWarn } = await exportAnnotatedPdf(state.pdfBytes, outPages);
     downloadBytes(bytes, exportName());
     toast(rotatedWarn ? "Exported (note: rotated pages may be offset)" : "Exported ✓");
   } catch (e) {
@@ -849,8 +1234,12 @@ async function onDocLoaded(pdfDoc, docId, label) {
   if (state.io) { state.io.disconnect(); state.io = null; }
   state.visible = new Set();
 
+  blankSeq = 0;
   for (let i = 1; i <= state.numPages; i++) {
     const pv = new PageView(i);
+    pv.kind = "pdf";
+    pv.uid = "p" + (i - 1);   // stable id independent of later inserts
+    pv.srcIndex = i - 1;      // original 0-based index, for export
     await pv.init(pdfDoc);
     el.pages.appendChild(pv.root);
     state.pages.push(pv);
@@ -862,9 +1251,9 @@ async function onDocLoaded(pdfDoc, docId, label) {
   state.scanIdealScale = scan.idealScale;
 
   computeFitScale();
-  relayoutAll();                            // size all page placeholders (cheap)
-  await loadAnnots();                       // restore saved markup
-  const ocrRestored = await loadOcrCache(); // restore any previously-OCR'd pages
+  await loadAnnots();                       // may re-insert saved blank pages → do before layout
+  relayoutAll();                            // size all page placeholders incl. blanks (cheap)
+  const ocrRestored = await loadOcrCache(); // restore any previously-OCR'd pages (by stable uid)
   state.hasText = nativeText || ocrRestored;
   reflectTextAvailability();
   setupPageObserver();                      // now paint only pages near the viewport
@@ -994,7 +1383,7 @@ async function ocrOnePage(pv, onProgress) {
   buildOcrTextLayer(pv, unit);
   state.hasText = true;
   reflectTextAvailability();
-  try { await api.storage.local.set({ [`ocr:${state.docId}:${pv.pageNum}`]: unit }); } catch { /* ignore */ }
+  try { await api.storage.local.set({ [`ocr:${state.docId}:${pv.uid}`]: unit }); } catch { /* ignore */ }
   return unit.length;
 }
 
@@ -1002,6 +1391,7 @@ async function ocrCurrentPage() {
   if (!globalThis.Tesseract) { toast("OCR engine failed to load"); return; }
   const pv = currentPageView();
   if (!pv) { toast("Open a PDF first"); return; }
+  if (pv.kind === "blank") { toast("This is a blank page — nothing to recognize."); return; }
   if (pv._ocrDone) { toast(`Page ${pv.pageNum} is already recognized`); return; }
   toast("OCR: rendering page…", 60000);
   try {
@@ -1023,7 +1413,7 @@ function setOcrAllBtn(running) {
 async function ocrAllPages() {
   if (state.ocrRunning) { state.ocrCancel = true; return; }
   if (!globalThis.Tesseract) { toast("OCR engine failed to load"); return; }
-  const pending = state.pages.filter((pv) => !pv._ocrDone);
+  const pending = state.pages.filter((pv) => pv.kind !== "blank" && !pv._ocrDone);
   if (!pending.length) { toast("All pages are already recognized"); return; }
 
   state.ocrRunning = true;
@@ -1183,10 +1573,13 @@ async function loadOcrCache() {
   let all;
   try { all = await api.storage.local.get(null); } catch { return; }
   const prefix = `ocr:${state.docId}:`;
+  const byUid = new Map(state.pages.map((pv) => [pv.uid, pv]));
   let any = false;
   for (const k of Object.keys(all)) {
     if (!k.startsWith(prefix)) continue;
-    const pv = state.pages[(+k.slice(prefix.length)) - 1];
+    const suffix = k.slice(prefix.length);
+    let pv = byUid.get(suffix);
+    if (!pv && /^\d+$/.test(suffix)) pv = byUid.get("p" + (parseInt(suffix, 10) - 1)); // legacy numeric key
     if (pv && Array.isArray(all[k])) { buildOcrTextLayer(pv, all[k]); any = true; }
   }
   return any;
@@ -1207,11 +1600,14 @@ const MAX_PAGE_WIDTH = 1400; // px — cap so ultra-wide monitors don't over-zoo
 // Default: fit the page to the available width (fills the stage), capped so a
 // 4K monitor doesn't blow it up absurdly. Zoom controls adjust from there.
 function computeFitScale() {
-  const first = state.pages[0];
-  if (!first) return;
-  const vpAt1 = first.pdfPage.getViewport({ scale: 1 });
+  if (!state.pages.length) return;
+  // fit the WIDEST page (mixed-size PDFs have landscape pages) so none overflows
+  // horizontally; for uniform PDFs this equals the first page's width.
+  let maxW = 0;
+  for (const pv of state.pages) maxW = Math.max(maxW, unitSizeOf(pv).w);
+  if (!maxW) return;
   const avail = Math.min(el.stage.clientWidth - 48, MAX_PAGE_WIDTH);
-  let s = avail / vpAt1.width;
+  let s = avail / maxW;
   // for scans, don't enlarge past the source's own pixels (upscaling = blur)
   if (state.rasterScan) s = Math.min(s, state.scanIdealScale);
   state.baseScale = Math.max(0.2, Math.min(3, s));
@@ -1220,11 +1616,12 @@ function computeFitScale() {
 
 // Explicit "Fit" button: fill the available width (may upscale).
 function fitToWidth() {
-  const first = state.pages[0];
-  if (!first) return;
-  const vpAt1 = first.pdfPage.getViewport({ scale: 1 });
+  if (!state.pages.length) return;
+  let maxW = 0;
+  for (const pv of state.pages) maxW = Math.max(maxW, unitSizeOf(pv).w);
+  if (!maxW) return;
   const avail = Math.min(el.stage.clientWidth - 48, MAX_PAGE_WIDTH);
-  state.baseScale = Math.max(0.2, avail / vpAt1.width);
+  state.baseScale = Math.max(0.2, avail / maxW);
   state.scale = 1.0;
   rerender();
 }
@@ -1425,6 +1822,7 @@ function mergeLineRects(qs) {
 
 // ---------- selection / move / resize geometry (unit space) ----------
 function annotBBox(a) {
+  if (a.type === "image") return { x: a.x, y: a.y, w: a.w || 0, h: a.h || 0 };
   if (a.type === "hltext") {
     const rs = a.rects || [];
     if (!rs.length) return { x: 0, y: 0, w: 0, h: 0 };
@@ -1476,7 +1874,7 @@ function hitHandle(a, p, tol) {
 
 function translateAnnot(a, dx, dy) {
   if (a.type === "hltext") { for (const r of a.rects) { r.x += dx; r.y += dy; } return; }
-  if (a.type === "text") { a.x += dx; a.y += dy; return; }
+  if (a.type === "text" || a.type === "image") { a.x += dx; a.y += dy; return; }
   for (const p of a.points) { p.x += dx; p.y += dy; }
 }
 
@@ -1507,19 +1905,25 @@ function resizeAnnot(a, drag, p) {
   } else if (a.type === "text") {
     a.x = mapX(before.x); a.y = mapY(before.y);
     a.fontSize = Math.max(6, (before.fontSize || 16) * sy);
+  } else if (a.type === "image") {
+    a.x = mapX(before.x); a.y = mapY(before.y);
+    a.w = Math.max(1, (before.w || 0) * sx);
+    a.h = Math.max(1, (before.h || 0) * sy);
   } else {
     a.points = before.points.map((pt) => ({ ...pt, x: mapX(pt.x), y: mapY(pt.y) }));
   }
 }
 
 function snapshotGeom(a) {
-  return JSON.parse(JSON.stringify({ points: a.points, rects: a.rects, x: a.x, y: a.y, fontSize: a.fontSize }));
+  return JSON.parse(JSON.stringify({ points: a.points, rects: a.rects, x: a.x, y: a.y, w: a.w, h: a.h, fontSize: a.fontSize }));
 }
 function applyGeom(a, snap) {
   if (snap.points !== undefined) a.points = JSON.parse(JSON.stringify(snap.points));
   if (snap.rects !== undefined) a.rects = JSON.parse(JSON.stringify(snap.rects));
   if (snap.x !== undefined) a.x = snap.x;
   if (snap.y !== undefined) a.y = snap.y;
+  if (snap.w !== undefined) a.w = snap.w;
+  if (snap.h !== undefined) a.h = snap.h;
   if (snap.fontSize !== undefined) a.fontSize = snap.fontSize;
 }
 
@@ -1644,7 +2048,7 @@ function wireKeyboard() {
     else if (mod && e.key.toLowerCase() === "s") { e.preventDefault(); saveAnnots(true); }
     else if (mod && e.key.toLowerCase() === "e") { e.preventDefault(); exportPdf(); }
     else if (!mod) {
-      const map = { p: "pen", b: "brush", h: "hltext", m: "hlfree", l: "line", a: "arrow", r: "rect", o: "ellipse", t: "text", e: "eraser", v: "select" };
+      const map = { p: "pen", b: "brush", h: "hltext", m: "hlfree", l: "line", a: "arrow", r: "rect", o: "ellipse", t: "text", i: "image", e: "eraser", v: "select" };
       if (map[e.key.toLowerCase()]) setTool(map[e.key.toLowerCase()]);
     }
   });
@@ -1662,6 +2066,26 @@ function wireFileEntry() {
 
   document.getElementById("dz-pick").addEventListener("click", () => el.fileInput.click());
 
+  // picked an image (via the Image tool, or the Replace menu)
+  el.imageInput.addEventListener("change", async () => {
+    const f = el.imageInput.files[0];
+    el.imageInput.value = "";
+    if (!f) { pendingImagePlace = null; replaceTarget = null; return; }
+    try {
+      const { src, ratio } = await fileToImageSrc(f);
+      if (replaceTarget) {
+        applyImageReplace(src, ratio);
+      } else {
+        const t = pendingImagePlace || defaultPlaceTarget();
+        if (t) placeImageAt(t.pv, t.x, t.y, src, ratio);
+      }
+    } catch (err) {
+      toast("Couldn't add image: " + err.message, 3500);
+    } finally {
+      pendingImagePlace = null;
+    }
+  });
+
   ["dragenter", "dragover"].forEach((ev) =>
     el.stage.addEventListener(ev, (e) => { e.preventDefault(); el.dropzone.classList.add("dragover"); })
   );
@@ -1671,6 +2095,19 @@ function wireFileEntry() {
   el.stage.addEventListener("drop", async (e) => {
     const f = e.dataTransfer.files[0];
     if (!f) return;
+    // an image dropped onto an open PDF becomes an image annotation where it landed
+    if (/^image\//i.test(f.type)) {
+      if (!state.pdfDoc) { toast("Open a PDF first, then drop images onto it."); return; }
+      const t = pageAtClient(e.clientX, e.clientY) || defaultPlaceTarget();
+      if (!t) return;
+      try {
+        const { src, ratio } = await fileToImageSrc(f);
+        placeImageAt(t.pv, t.x, t.y, src, ratio);
+      } catch (err) {
+        toast("Couldn't add image: " + err.message, 3500);
+      }
+      return;
+    }
     const buf = await f.arrayBuffer();
     await loadFromArrayBuffer(buf, f.name).catch((err) => toast("Open failed: " + err.message));
   });
