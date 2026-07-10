@@ -1,0 +1,92 @@
+/* Split view shell — reuses viewer.css for the toolbar/rail/properties look,
+   adds the multi-pane layout on top. */
+
+#panes {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  min-width: 0;
+  background: var(--bg-stage);
+}
+
+.pane {
+  flex: 1 1 0;
+  min-width: 140px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  position: relative;
+  box-shadow: inset 0 0 0 0 var(--accent);
+  transition: box-shadow .12s;
+}
+.pane.active { box-shadow: inset 0 0 0 2px var(--accent); }
+
+.pane-head {
+  height: 30px; flex: none;
+  display: flex; align-items: center; gap: 6px;
+  padding: 0 6px 0 10px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+  user-select: none;
+}
+.pane.active .pane-head { background: #1d2233; }
+.pane-title {
+  flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--muted); font-size: 12px;
+}
+.pane.active .pane-title { color: var(--text); }
+.pane-open, .pane-close {
+  flex: none; height: 22px;
+  border: 1px solid var(--border); border-radius: 6px;
+  background: var(--bg-elev); color: var(--muted);
+  font-size: 11px; cursor: pointer; padding: 0 8px;
+}
+.pane-open:hover { background: var(--bg-elev-hover); color: var(--text); }
+.pane-close { width: 22px; padding: 0; font-size: 12px; }
+.pane-close:hover { background: rgba(239,68,68,.16); color: var(--danger); border-color: transparent; }
+
+.pane-frame {
+  flex: 1; width: 100%; border: 0; display: block;
+  background: var(--bg-stage);
+}
+
+.divider {
+  flex: none; width: 6px; cursor: col-resize;
+  background: var(--border);
+}
+.divider:hover, #panes.dragging .divider { background: var(--accent); }
+/* while dragging a divider, don't let iframes swallow the mouse move */
+#panes.dragging .pane-frame { pointer-events: none; }
+
+/* the shell always shows its toolbar chrome */
+#topbar, #toolrail, #properties { display: flex; }
+
+.tb-tool.disabled { opacity: .35; pointer-events: none; }
+
+/* "Add PDF" button in the top bar */
+#btn-add { white-space: nowrap; }
+
+/* export progress overlay on the pane whose PDF is downloading */
+.pane-busy {
+  position: absolute; inset: 0; z-index: 20;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(10,10,14,.55);
+}
+.pane-busy-card {
+  display: flex; flex-direction: column; align-items: stretch; gap: 10px;
+  width: min(320px, 78%); padding: 16px 18px;
+  background: var(--bg-elev); border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: 0 12px 34px rgba(0,0,0,.6);
+  color: var(--text); font-size: 13px; font-weight: 500;
+}
+.pane-busy-text { text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pane-busy-bar { height: 6px; border-radius: 999px; background: var(--border); overflow: hidden; }
+.pane-busy-fill {
+  height: 100%; width: 0; border-radius: 999px;
+  background: var(--accent); transition: width .18s ease;
+}
+.pane-busy.done .pane-busy-text { color: #22c55e; }
+.pane-busy.done .pane-busy-fill { background: #22c55e; }
+.pane-busy.error .pane-busy-text { color: var(--danger); }
+.pane-busy.error .pane-busy-fill { background: var(--danger); }

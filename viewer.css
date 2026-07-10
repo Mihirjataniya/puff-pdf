@@ -319,6 +319,13 @@ body { display: flex; flex-direction: column; }
 
 .hidden { display: none !important; }
 
+/* embedded pane (split view): the shared toolbar lives in the parent shell */
+body.embed #topbar,
+body.embed #toolrail,
+body.embed #properties,
+body.embed #shapes-flyout { display: none !important; }
+body.embed #stage { padding-top: 10px; }
+
 /* ---------- tooltip ---------- */
 #tip {
   position: fixed; z-index: 100; display: none;

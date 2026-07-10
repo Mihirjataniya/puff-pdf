@@ -14,6 +14,10 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
 
 const api = globalThis.browser || globalThis.chrome;
 
+// Embedded mode: this viewer runs inside a split-view pane (an iframe). Its own
+// chrome is hidden; a shared toolbar in the parent shell drives it via postMessage.
+const EMBED = new URLSearchParams(location.search).has("embed");
+
 // ---------- global state ----------
 const state = {
   pdfDoc: null,
@@ -1175,6 +1179,28 @@ function exportName() {
   return `${base} (annotated).pdf`;
 }
 
+// Uint8Array → base64 (chunked so large PDFs don't blow the call stack).
+function bytesToB64(u8) {
+  let s = "";
+  const CH = 0x8000;
+  for (let i = 0; i < u8.length; i += CH) s += String.fromCharCode.apply(null, u8.subarray(i, i + CH));
+  return btoa(s);
+}
+
+// Open the split view, handing the currently-open PDF to its first pane so it
+// stays open; the second pane starts empty for the user to pick another file.
+const SPLIT_HANDOFF_KEY = "puff:split-handoff";
+async function openSplitView() {
+  try {
+    if (state.pdfBytes) {
+      await api.storage.local.set({ [SPLIT_HANDOFF_KEY]: { b64: bytesToB64(state.pdfBytes), name: state.sourceLabel || "document.pdf" } });
+    } else {
+      await api.storage.local.remove(SPLIT_HANDOFF_KEY);   // no stale doc for an empty split
+    }
+  } catch { /* handoff is best-effort */ }
+  window.open("split.html", "_blank");
+}
+
 function downloadBytes(bytes, name) {
   const blob = new Blob([bytes], { type: "application/pdf" });
   const url = URL.createObjectURL(blob);
@@ -1192,13 +1218,17 @@ async function exportPdf() {
   const outPages = buildOutPages();
   const hasMarkup = outPages.some((op) => op.blank || op.annots.length);
   if (!hasMarkup) { toast("Nothing to export yet — draw something or add a page"); return; }
+  const name = exportName();
   toast("Building PDF…", 60000);
+  postToShell({ __puff: "export", phase: "start", name });   // split view: show which PDF is exporting
   try {
     const { bytes, rotatedWarn } = await exportAnnotatedPdf(state.pdfBytes, outPages);
-    downloadBytes(bytes, exportName());
+    downloadBytes(bytes, name);
     toast(rotatedWarn ? "Exported (note: rotated pages may be offset)" : "Exported ✓");
+    postToShell({ __puff: "export", phase: "done", name });
   } catch (e) {
     toast("Export failed: " + e.message, 4000);
+    postToShell({ __puff: "export", phase: "error", name, message: e.message });
   }
 }
 
@@ -1269,6 +1299,7 @@ async function onDocLoaded(pdfDoc, docId, label) {
   el.docName.textContent = shortLabel(label);
   document.title = "Puff PDF — " + shortLabel(label);
   setTool(state.tool);   // sync tool UI / show the properties bar now a doc is open
+  syncShell();           // tell the split-view shell this pane's new doc/readout
 }
 
 // Does this PDF have a usable text layer? Sample the first few pages.
@@ -1323,6 +1354,7 @@ function reflectTextAvailability() {
   btn.dataset.tip = state.hasText
     ? "Highlight text — drag across words, snaps to them (H)"
     : "Unavailable — this PDF is scanned. Run OCR (🔎) first, or use the freehand highlighter (M).";
+  syncShell();
 }
 
 // ---------- OCR: build a selectable text layer over a scanned page ----------
@@ -1407,6 +1439,7 @@ function setOcrAllBtn(running) {
   if (!btn) return;
   btn.textContent = running ? "⏹ Stop" : "🔎 All";
   btn.dataset.tip = running ? "Stop OCR (Esc)" : "OCR every page (runs in background, cancellable)";
+  syncShell();
 }
 
 // Recognize all pages sequentially (cancellable). Re-click / Esc to stop.
@@ -1631,6 +1664,7 @@ function relayoutAll() {
   const s = effectiveScale();
   for (const pv of state.pages) pv.layout(s);
   el.zoomLabel.textContent = Math.round(state.scale * 100) + "%";
+  syncShell();
 }
 
 async function repaintVisible() {
@@ -1682,9 +1716,12 @@ function currentPageView() {
 }
 
 function updatePageReadout() {
-  if (!state.numPages) { el.pageReadout.textContent = "— / —"; return; }
-  const pv = currentPageView();
-  el.pageReadout.textContent = `${pv ? pv.pageNum : 1} / ${state.numPages}`;
+  if (!state.numPages) { el.pageReadout.textContent = "— / —"; }
+  else {
+    const pv = currentPageView();
+    el.pageReadout.textContent = `${pv ? pv.pageNum : 1} / ${state.numPages}`;
+  }
+  syncShell();
 }
 
 // ---------- toolbar ----------
@@ -2002,6 +2039,8 @@ function setColor(c, swatchEl) {
 
 function wireToolbar() {
   document.getElementById("btn-open").addEventListener("click", () => el.fileInput.click());
+  const splitBtn = document.getElementById("btn-split");
+  if (splitBtn) splitBtn.addEventListener("click", openSplitView);
   document.getElementById("btn-zoom-in").addEventListener("click", () => setZoom(1.15));
   document.getElementById("btn-zoom-out").addEventListener("click", () => setZoom(1 / 1.15));
   document.getElementById("btn-fit").addEventListener("click", fitToWidth);
@@ -2049,9 +2088,73 @@ function wireKeyboard() {
     else if (mod && e.key.toLowerCase() === "e") { e.preventDefault(); exportPdf(); }
     else if (!mod) {
       const map = { p: "pen", b: "brush", h: "hltext", m: "hlfree", l: "line", a: "arrow", r: "rect", o: "ellipse", t: "text", i: "image", e: "eraser", v: "select" };
-      if (map[e.key.toLowerCase()]) setTool(map[e.key.toLowerCase()]);
+      const t = map[e.key.toLowerCase()];
+      if (t) {
+        // in split view the tool is shared: let the shell switch every pane
+        if (EMBED) postToShell({ __puff: "toolKey", tool: t });
+        else setTool(t);
+      }
     }
   });
+}
+
+// ---------- split-view embed bridge (postMessage to/from the shell) ----------
+function postToShell(msg) {
+  if (EMBED && window.parent && window.parent !== window) window.parent.postMessage(msg, "*");
+}
+
+// Report this pane's readout so the shared toolbar can mirror the active pane.
+function syncShell() {
+  if (!EMBED) return;
+  const pv = currentPageView();
+  postToShell({
+    __puff: "state",
+    hasDoc: !!state.pdfDoc,
+    docName: state.sourceLabel ? shortLabel(state.sourceLabel) : "",
+    page: pv ? pv.pageNum : 0,
+    numPages: state.numPages,
+    zoom: Math.round(state.scale * 100),
+    hasText: state.hasText,
+    ocrRunning: state.ocrRunning,
+  });
+}
+
+// Commands from the shared toolbar → drive this pane through existing functions.
+function onShellMessage(e) {
+  const m = e.data;
+  if (!m || m.__puff !== "cmd") return;
+  switch (m.cmd) {
+    case "tool": if (m.tool === "poly" && m.shape) state.polyShape = m.shape; setTool(m.tool); break;
+    case "color": setColor(m.color, null); if (activeEdit) activeEdit.refresh(); break;
+    case "width": state.width = m.value; if (activeEdit) activeEdit.refresh(); break;
+    case "opacity": state.opacity = m.value / 100; break;
+    case "font": state.fontFamily = m.value; if (activeEdit) activeEdit.refresh(); break;
+    case "undo": undo(); break;
+    case "redo": redo(); break;
+    case "clear": clearCurrentPage(); break;
+    case "save": saveAnnots(true); break;
+    case "export": exportPdf(); break;
+    case "ocrPage": ocrCurrentPage(); break;
+    case "ocrAll": ocrAllPages(); break;
+    case "read": startReading(); break;
+    case "zoomIn": setZoom(1.15); break;
+    case "zoomOut": setZoom(1 / 1.15); break;
+    case "fit": fitToWidth(); break;
+    case "loadBuffer": loadFromArrayBuffer(m.buf, m.name || "document.pdf").catch((err) => toast("Open failed: " + err.message)); break;
+    case "loadUrl": loadFromUrl(m.url).catch((err) => toast("Could not load PDF: " + err.message)); break;
+    case "requestState": syncShell(); break;
+  }
+}
+
+function wireEmbed() {
+  if (!EMBED) return;
+  document.body.classList.add("embed");
+  window.addEventListener("message", onShellMessage);
+  // clicking anywhere in this pane makes it the active pane
+  el.stage.addEventListener("pointerdown", () => postToShell({ __puff: "focus" }), true);
+  el.dropzone.addEventListener("pointerdown", () => postToShell({ __puff: "focus" }), true);
+  // tell the shell we're ready to receive commands (tool sync, queued loads)
+  postToShell({ __puff: "ready" });
 }
 
 // ---------- file open / drag-drop ----------
@@ -2179,6 +2282,7 @@ function boot() {
   wireTooltips();
   wireShapesFlyout();
   wireReadAloud();
+  wireEmbed();
   setTool("pen");
 
   el.stage.addEventListener("scroll", updatePageReadout, { passive: true });

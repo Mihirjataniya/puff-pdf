@@ -25,6 +25,8 @@
       "resources": [
         "viewer.html",
         "viewer.css",
+        "split.html",
+        "split.css",
         "lib/*",
         "src/*",
         "icons/*"

@@ -3,11 +3,12 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Puff PDF</title>
+  <title>Puff PDF — Split view</title>
   <link rel="stylesheet" href="viewer.css" />
+  <link rel="stylesheet" href="split.css" />
 </head>
 <body>
-  <!-- icon sprite -->
+  <!-- icon sprite (shared with viewer.html) -->
   <svg width="0" height="0" style="position:absolute" aria-hidden="true">
     <defs>
       <symbol id="i-open" viewBox="0 0 24 24"><path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2" /></symbol>
@@ -57,39 +58,38 @@
     </defs>
   </svg>
 
-  <!-- ================= top bar ================= -->
+  <!-- ================= shared top bar ================= -->
   <header id="topbar">
     <div class="tb-left">
-      <span class="brand"><svg class="ic"><use href="#i-pen"/></svg>Puff PDF</span>
-      <button id="btn-open" class="btn" data-tip="Open a PDF (or drag one onto the page)"><svg class="ic"><use href="#i-open"/></svg><span>Open</span></button>
-      <button id="btn-split" class="btn ghost" data-tip="Open the side-by-side split view (compare multiple PDFs)"><svg class="ic"><use href="#i-split"/></svg><span>Split</span></button>
-      <span id="doc-name" class="doc-name"></span>
+      <span class="brand"><svg class="ic"><use href="#i-split"/></svg>Puff PDF · Split</span>
+      <button id="btn-open" class="btn" title="Open a PDF in the active pane"><svg class="ic"><use href="#i-open"/></svg><span>Open</span></button>
+      <button id="btn-add" class="btn primary" title="Add another PDF pane"><svg class="ic"><use href="#i-split"/></svg><span>＋ Add PDF</span></button>
     </div>
 
     <div class="tb-right">
-      <button id="btn-undo" class="icon-btn" data-tip="Undo (Ctrl+Z)"><svg class="ic"><use href="#i-undo"/></svg></button>
-      <button id="btn-redo" class="icon-btn" data-tip="Redo (Ctrl+Y)"><svg class="ic"><use href="#i-redo"/></svg></button>
+      <button id="btn-undo" class="icon-btn" title="Undo (Ctrl+Z)"><svg class="ic"><use href="#i-undo"/></svg></button>
+      <button id="btn-redo" class="icon-btn" title="Redo (Ctrl+Y)"><svg class="ic"><use href="#i-redo"/></svg></button>
 
       <span class="vr"></span>
 
       <div class="ocr-wrap">
-        <button id="btn-ocr" class="btn ghost" data-tip="Recognize text on the current page so a scanned PDF becomes selectable"><svg class="ic"><use href="#i-ocr"/></svg><span>OCR page</span></button>
-        <button id="btn-ocr-all" class="btn ghost slim" data-tip="OCR every page (runs in background, cancellable)">All</button>
-        <button id="btn-read" class="btn ghost" data-tip="Read the page aloud (text-to-speech)"><svg class="ic"><use href="#i-read"/></svg><span>Read</span></button>
+        <button id="btn-ocr" class="btn ghost" title="OCR the active PDF's current page"><svg class="ic"><use href="#i-ocr"/></svg><span>OCR page</span></button>
+        <button id="btn-ocr-all" class="btn ghost slim" title="OCR every page of the active PDF">All</button>
+        <button id="btn-read" class="btn ghost" title="Read the active PDF aloud"><svg class="ic"><use href="#i-read"/></svg><span>Read</span></button>
       </div>
 
       <span class="vr"></span>
 
-      <button id="btn-save" class="btn" data-tip="Save your markup for this PDF — comes back next time (Ctrl+S)"><svg class="ic"><use href="#i-save"/></svg><span>Save</span></button>
-      <button id="btn-export" class="btn primary" data-tip="Download a real PDF with your markup baked in — opens anywhere (Ctrl+E)"><svg class="ic"><use href="#i-export"/></svg><span>Export PDF</span></button>
+      <button id="btn-save" class="btn" title="Save markup for the active PDF (Ctrl+S)"><svg class="ic"><use href="#i-save"/></svg><span>Save</span></button>
+      <button id="btn-export" class="btn primary" title="Export the active PDF with markup (Ctrl+E)"><svg class="ic"><use href="#i-export"/></svg><span>Export PDF</span></button>
 
       <span class="vr"></span>
 
       <div class="zoom">
-        <button id="btn-zoom-out" class="icon-btn" data-tip="Zoom out"><svg class="ic"><use href="#i-zoom-out"/></svg></button>
-        <span id="zoom-label" class="readout">100%</span>
-        <button id="btn-zoom-in" class="icon-btn" data-tip="Zoom in"><svg class="ic"><use href="#i-zoom-in"/></svg></button>
-        <button id="btn-fit" class="icon-btn" data-tip="Fit page to window width"><svg class="ic"><use href="#i-fit"/></svg></button>
+        <button id="btn-zoom-out" class="icon-btn" title="Zoom out (active pane)"><svg class="ic"><use href="#i-zoom-out"/></svg></button>
+        <span id="zoom-label" class="readout">—</span>
+        <button id="btn-zoom-in" class="icon-btn" title="Zoom in (active pane)"><svg class="ic"><use href="#i-zoom-in"/></svg></button>
+        <button id="btn-fit" class="icon-btn" title="Fit active pane to width"><svg class="ic"><use href="#i-fit"/></svg></button>
       </div>
       <span id="page-readout" class="readout page">— / —</span>
     </div>
@@ -97,24 +97,24 @@
 
   <!-- ================= body ================= -->
   <div id="body">
-    <!-- left tool rail -->
+    <!-- shared left tool rail -->
     <nav id="toolrail" aria-label="Drawing tools">
-      <button class="tb-tool" data-tool="select" data-tip="Select — click a mark to move, resize (handles), or delete it (V)"><svg class="ic"><use href="#i-select"/></svg></button>
+      <button class="tb-tool" data-tool="select" title="Select (V)"><svg class="ic"><use href="#i-select"/></svg></button>
       <div class="rail-sep"></div>
-      <button class="tb-tool" data-tool="pen"    data-tip="Pen — freehand solid line (P)"><svg class="ic"><use href="#i-pen"/></svg></button>
-      <button class="tb-tool" data-tool="brush"  data-tip="Brush — width follows pen pressure (B)"><svg class="ic"><use href="#i-brush"/></svg></button>
+      <button class="tb-tool" data-tool="pen"    title="Pen (P)"><svg class="ic"><use href="#i-pen"/></svg></button>
+      <button class="tb-tool" data-tool="brush"  title="Brush (B)"><svg class="ic"><use href="#i-brush"/></svg></button>
       <div class="rail-sep"></div>
-      <button class="tb-tool" data-tool="hltext" data-tip="Highlight text — drag across words, snaps to them (H)"><svg class="ic"><use href="#i-hltext"/></svg></button>
-      <button class="tb-tool" data-tool="hlfree" data-tip="Highlighter — freehand translucent stroke (M)"><svg class="ic"><use href="#i-hlfree"/></svg></button>
+      <button class="tb-tool" data-tool="hltext" title="Highlight text (H)"><svg class="ic"><use href="#i-hltext"/></svg></button>
+      <button class="tb-tool" data-tool="hlfree" title="Highlighter (M)"><svg class="ic"><use href="#i-hlfree"/></svg></button>
       <div class="rail-sep"></div>
-      <button class="tb-tool" id="btn-shapes" data-tip="Shapes — click to pick (line, arrow, rectangle, star, polygon…)"><svg class="ic"><use id="shapes-icon-use" href="#i-rect"/></svg></button>
+      <button class="tb-tool" id="btn-shapes" title="Shapes"><svg class="ic"><use id="shapes-icon-use" href="#i-rect"/></svg></button>
       <div class="rail-sep"></div>
-      <button class="tb-tool" data-tool="text"   data-tip="Text box — click on the page, then type (T)"><svg class="ic"><use href="#i-text"/></svg></button>
-      <button class="tb-tool" data-tool="image"  data-tip="Image — click the page to add a picture (or drop one in). Drag/resize with the handles; double-click to replace or delete (I)"><svg class="ic"><use href="#i-image"/></svg></button>
-      <button class="tb-tool" data-tool="eraser" data-tip="Eraser — click or drag over marks to remove (E)"><svg class="ic"><use href="#i-eraser"/></svg></button>
+      <button class="tb-tool" data-tool="text"   title="Text box (T)"><svg class="ic"><use href="#i-text"/></svg></button>
+      <button class="tb-tool" data-tool="image"  title="Image (I)"><svg class="ic"><use href="#i-image"/></svg></button>
+      <button class="tb-tool" data-tool="eraser" title="Eraser (E)"><svg class="ic"><use href="#i-eraser"/></svg></button>
 
       <div class="rail-grow"></div>
-      <button id="btn-clear" class="icon-btn danger" data-tip="Clear all marks on the current page (undoable)"><svg class="ic"><use href="#i-trash"/></svg></button>
+      <button id="btn-clear" class="icon-btn danger" title="Clear all marks on the active PDF's current page"><svg class="ic"><use href="#i-trash"/></svg></button>
     </nav>
 
     <!-- shapes flyout -->
@@ -145,12 +145,12 @@
 
     <!-- work area -->
     <div id="workarea">
-      <!-- contextual properties for the active tool -->
+      <!-- shared contextual properties for the active tool -->
       <div id="properties">
         <span id="tool-name" class="tool-name">Pen</span>
         <span class="prop-sep"></span>
         <div id="swatches"></div>
-        <input type="color" id="color" value="#e11d48" data-tip="Custom color" />
+        <input type="color" id="color" value="#e11d48" title="Custom color" />
         <label class="prop" id="prop-width"><span>Size</span><input type="range" id="width" min="1" max="40" value="3" /></label>
         <label class="prop" id="prop-opacity"><span>Opacity</span><input type="range" id="opacity" min="10" max="100" value="100" /></label>
         <label class="prop hidden" id="prop-font"><span class="font-ic">A</span>
@@ -162,37 +162,13 @@
         </label>
       </div>
 
-      <main id="stage">
-        <div id="dropzone">
-          <div class="dz-inner">
-            <div class="dz-icon"><svg class="ic ic-lg"><use href="#i-pen"/></svg></div>
-            <h1>Mark up any PDF</h1>
-            <p class="dz-lead">Draw, highlight sentences, add notes — then export a real PDF that keeps your markup anywhere.</p>
-            <button id="dz-pick" class="btn primary big"><svg class="ic"><use href="#i-open"/></svg><span>Open a PDF</span></button>
-            <p class="dz-sub">or drop a file here · 100% local, nothing is uploaded</p>
-          </div>
-        </div>
-        <div id="pages"></div>
-      </main>
+      <!-- panes host the embedded viewers -->
+      <div id="panes"></div>
     </div>
   </div>
 
   <input type="file" id="file-input" accept="application/pdf,.pdf" hidden />
-  <input type="file" id="image-input" accept="image/*" hidden />
 
-  <!-- read-aloud control bar -->
-  <div id="read-bar" class="hidden">
-    <button id="rb-play" class="icon-btn" title="Play / pause">⏸</button>
-    <button id="rb-stop" class="icon-btn" title="Stop">⏹</button>
-    <label class="rb-field">Speed <input id="rb-rate" type="range" min="0.5" max="2" step="0.1" value="1" /></label>
-    <select id="rb-voice" class="rb-voice" title="Voice"></select>
-    <span class="rb-label"><svg class="ic"><use href="#i-read"/></svg> Reading…</span>
-  </div>
-
-  <div id="toast" class="hidden"></div>
-
-  <script src="lib/pdf-lib.min.js"></script>
-  <script src="lib/tesseract/tesseract.min.js"></script>
-  <script type="module" src="src/viewer.js"></script>
+  <script type="module" src="src/split.js"></script>
 </body>
 </html>
