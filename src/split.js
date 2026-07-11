@@ -375,7 +375,7 @@ function wireKeyboard() {
     else if (mod && k === "s") { e.preventDefault(); sendActive({ cmd: "save" }); }
     else if (mod && k === "e") { e.preventDefault(); sendActive({ cmd: "export" }); }
     else if (!mod) {
-      const map = { p: "pen", b: "brush", h: "hltext", m: "hlfree", l: "line", a: "arrow", r: "rect", o: "ellipse", t: "text", i: "image", e: "eraser", v: "select" };
+      const map = { p: "pen", b: "brush", h: "hltext", m: "hlfree", l: "line", a: "arrow", r: "rect", o: "ellipse", t: "text", i: "image", n: "note", e: "eraser", v: "select" };
       if (map[k]) setTool(map[k]);
     }
   });

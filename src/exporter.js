@@ -1,4 +1,4 @@
-import { shapeVertices, curvedPts } from "./annots.js";
+import { shapeVertices, curvedPts, NOTE, NOTE_COLORS, wrapNoteLines } from "./annots.js";
 
 // Burn annotations into a real PDF using pdf-lib (loaded as global PDFLib).
 // Unit space (our annotations) = PDF points, origin top-left, y-down.
@@ -27,7 +27,7 @@ function dataUrlToBytes(dataUrl) {
 //   { blank: boolean, w, h, annots: [...] }
 // Original PDF pages stay in their order; blank pages are inserted at their index.
 export async function exportAnnotatedPdf(pdfBytes, outPages) {
-  const { PDFDocument, rgb, StandardFonts, LineCapStyle } = globalThis.PDFLib;
+  const { PDFDocument, rgb, StandardFonts, LineCapStyle, degrees } = globalThis.PDFLib;
   const pdf = await PDFDocument.load(pdfBytes);
   const fonts = {
     sans: await pdf.embedFont(StandardFonts.Helvetica),
@@ -39,7 +39,7 @@ export async function exportAnnotatedPdf(pdfBytes, outPages) {
   outPages.forEach((op, i) => { if (op.blank) pdf.insertPage(i, [op.w, op.h]); });
 
   const pages = pdf.getPages();
-  const ctx = { rgb, font: fonts.sans, fonts, cap: LineCapStyle.Round };
+  const ctx = { rgb, degrees, font: fonts.sans, fonts, cap: LineCapStyle.Round };
 
   // embed each unique image once (pdf-lib supports PNG + JPEG)
   const images = new Map();
@@ -159,7 +159,41 @@ function drawOne(page, a, ph, ctx) {
     case "image": {
       const emb = ctx.images && ctx.images.get(a.src);
       if (emb && a.w > 0 && a.h > 0) {
-        page.drawImage(emb, { x: a.x, y: Y(a.y + a.h), width: a.w, height: a.h, opacity: op });
+        const phi = a.rot || 0;
+        if (!phi) {
+          page.drawImage(emb, { x: a.x, y: Y(a.y + a.h), width: a.w, height: a.h, opacity: op });
+        } else {
+          // pdf-lib rotates about the (x,y) anchor; solve the anchor so the image
+          // spins about its center. Screen rot is y-down, PDF is y-up → angle negates.
+          const cos = Math.cos(phi), sin = Math.sin(phi);
+          const cxu = a.x + a.w / 2, cyp = Y(a.y + a.h / 2);
+          const x = cxu - (a.w / 2) * cos - (a.h / 2) * sin;
+          const y = cyp + (a.w / 2) * sin - (a.h / 2) * cos;
+          page.drawImage(emb, { x, y, width: a.w, height: a.h, opacity: op, rotate: ctx.degrees(-phi * 180 / Math.PI) });
+        }
+      }
+      break;
+    }
+    case "note": {
+      const bg = hexToRgb(a.color || NOTE_COLORS[0]);
+      const fold = Math.min(18, a.w * 0.3, a.h * 0.3);
+      // body: polygon with the bottom-right corner clipped (y-up PDF space)
+      const top = Y(a.y), bot = Y(a.y + a.h), L = a.x, R = a.x + a.w;
+      page.drawRectangle({ x: L, y: bot, width: a.w, height: a.h, color: ctx.rgb(bg.r, bg.g, bg.b), opacity: op });
+      // darker folded corner (a small square at bottom-right, good-enough flat look)
+      const fg = hexToRgb(a.color || NOTE_COLORS[0]);
+      const d = 0.82; // darken
+      page.drawRectangle({ x: R - fold, y: bot, width: fold, height: fold, color: ctx.rgb(fg.r * d, fg.g * d, fg.b * d), opacity: op });
+      // wrapped text
+      const tf = ctx.fonts.sans, fs = NOTE.FONT, pad = NOTE.PAD, lh = fs * NOTE.LH;
+      const measure = (t) => tf.widthOfTextAtSize(t, fs);
+      const lines = wrapNoteLines(measure, a.text, a.w - pad * 2);
+      const tc = ctx.rgb(0.17, 0.17, 0.17);
+      let ty = a.y + pad;
+      for (const ln of lines) {
+        if (ty + lh > a.y + a.h - pad * 0.4) break;
+        page.drawText(ln, { x: a.x + pad, y: Y(ty) - fs, size: fs, font: tf, color: tc, opacity: op });
+        ty += lh;
       }
       break;
     }

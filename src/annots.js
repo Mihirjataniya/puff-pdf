@@ -120,6 +120,87 @@ function arrowHead(ctx, tip, from, s, width) {
   ctx.stroke();
 }
 
+// ---------- sticky notes ----------
+export const NOTE = { W: 190, H: 150, FONT: 14, PAD: 12, LH: 1.32, TEXT: "#2b2b2b" };
+export const NOTE_COLORS = ["#fff59d", "#ffcc80", "#f48fb1", "#a5d6a7", "#90caf9", "#ce93d8"];
+
+// Darken a #rrggbb by `amt` (0..1) for the folded-corner shading.
+function shade(hex, amt) {
+  let h = String(hex || "#fff59d").replace("#", "");
+  if (h.length === 3) h = h.split("").map((c) => c + c).join("");
+  const n = parseInt(h, 16);
+  const r = Math.max(0, ((n >> 16) & 255) * (1 - amt)) | 0;
+  const g = Math.max(0, ((n >> 8) & 255) * (1 - amt)) | 0;
+  const b = Math.max(0, (n & 255) * (1 - amt)) | 0;
+  return `rgb(${r},${g},${b})`;
+}
+
+// Greedy word-wrap into lines that fit `maxWidth`, honouring explicit newlines
+// and breaking any single word longer than the line. `measure(str) → width`.
+export function wrapNoteLines(measure, text, maxWidth) {
+  const out = [];
+  for (const para of String(text || "").split("\n")) {
+    if (para === "") { out.push(""); continue; }
+    let line = "";
+    for (const word of para.split(" ")) {
+      if (!line && measure(word) > maxWidth) {           // hard-break an overlong word
+        let chunk = "";
+        for (const ch of word) {
+          if (chunk && measure(chunk + ch) > maxWidth) { out.push(chunk); chunk = ch; }
+          else chunk += ch;
+        }
+        line = chunk;
+        continue;
+      }
+      const test = line ? line + " " + word : word;
+      if (!line || measure(test) <= maxWidth) line = test;
+      else { out.push(line); line = word; }
+    }
+    out.push(line);
+  }
+  return out;
+}
+
+function drawStickyNote(ctx, a, s) {
+  const x = a.x * s, y = a.y * s, w = (a.w || 0) * s, h = (a.h || 0) * s;
+  const fold = Math.min(18 * s, w * 0.3, h * 0.3);
+  ctx.save();
+  ctx.globalAlpha = a.opacity ?? 1;
+  // drop shadow, then body with a clipped bottom-right corner
+  ctx.shadowColor = "rgba(0,0,0,0.28)"; ctx.shadowBlur = 6 * s; ctx.shadowOffsetY = 2 * s;
+  ctx.fillStyle = a.color || NOTE_COLORS[0];
+  ctx.beginPath();
+  ctx.moveTo(x, y);
+  ctx.lineTo(x + w, y);
+  ctx.lineTo(x + w, y + h - fold);
+  ctx.lineTo(x + w - fold, y + h);
+  ctx.lineTo(x, y + h);
+  ctx.closePath();
+  ctx.fill();
+  ctx.shadowColor = "transparent"; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
+  // folded corner (darker triangle)
+  ctx.beginPath();
+  ctx.moveTo(x + w - fold, y + h);
+  ctx.lineTo(x + w, y + h - fold);
+  ctx.lineTo(x + w - fold, y + h - fold);
+  ctx.closePath();
+  ctx.fillStyle = shade(a.color, 0.18);
+  ctx.fill();
+  // wrapped text
+  const pad = NOTE.PAD * s, fs = NOTE.FONT * s, lh = fs * NOTE.LH;
+  ctx.fillStyle = NOTE.TEXT;
+  ctx.font = `${fs}px system-ui, -apple-system, sans-serif`;
+  ctx.textBaseline = "top";
+  const lines = wrapNoteLines((t) => ctx.measureText(t).width, a.text, w - pad * 2);
+  let ty = y + pad;
+  for (const ln of lines) {
+    if (ty + lh > y + h - pad * 0.4) break;   // clip overflow to the note body
+    ctx.fillText(ln, x + pad, ty);
+    ty += lh;
+  }
+  ctx.restore();
+}
+
 export function drawAnnotation(ctx, a, s) {
   ctx.save();
   ctx.globalAlpha = a.opacity ?? 1;
@@ -222,13 +303,25 @@ export function drawAnnotation(ctx, a, s) {
       lines.forEach((ln, i) => ctx.fillText(ln, a.x * s, a.y * s + i * fs * 1.25));
       break;
     }
+    case "note": {
+      drawStickyNote(ctx, a, s);
+      break;
+    }
     case "image": {
       // `a._img` is a decoded HTMLImageElement attached (non-enumerable) by the
       // viewer; if it isn't ready yet the viewer redraws once it loads.
       const img = a._img;
       if (img && img.complete && img.naturalWidth) {
         ctx.globalAlpha = a.opacity ?? 1;
-        ctx.drawImage(img, a.x * s, a.y * s, (a.w || 0) * s, (a.h || 0) * s);
+        const w = (a.w || 0) * s, h = (a.h || 0) * s;
+        if (a.rot) {
+          const cx = (a.x + (a.w || 0) / 2) * s, cy = (a.y + (a.h || 0) / 2) * s;
+          ctx.translate(cx, cy);
+          ctx.rotate(a.rot);
+          ctx.drawImage(img, -w / 2, -h / 2, w, h);
+        } else {
+          ctx.drawImage(img, a.x * s, a.y * s, w, h);
+        }
       }
       break;
     }
@@ -330,6 +423,16 @@ export function hitTestAnnot(a, x, y, tol) {
       return x >= r.x - t && x <= r.x + r.w + t && y >= r.y - t && y <= r.y + r.h + t;
     }
     case "image": {
+      let px = x, py = y;
+      if (a.rot) {                                    // un-rotate the point into the image's local frame
+        const cx = a.x + (a.w || 0) / 2, cy = a.y + (a.h || 0) / 2;
+        const co = Math.cos(-a.rot), si = Math.sin(-a.rot);
+        const dx = x - cx, dy = y - cy;
+        px = cx + dx * co - dy * si; py = cy + dx * si + dy * co;
+      }
+      return px >= a.x - tol && px <= a.x + (a.w || 0) + tol && py >= a.y - tol && py <= a.y + (a.h || 0) + tol;
+    }
+    case "note": {
       return x >= a.x - tol && x <= a.x + (a.w || 0) + tol && y >= a.y - tol && y <= a.y + (a.h || 0) + tol;
     }
     case "hltext": {

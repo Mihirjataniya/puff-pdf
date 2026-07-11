@@ -71,15 +71,17 @@ body { display: flex; flex-direction: column; }
   user-select: none;
 }
 .tb-left, .tb-right { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.tb-right { overflow-x: auto; scrollbar-width: thin; }
+.tb-left { flex: 1 1 auto; overflow: hidden; }   /* shrinks first; doc-name absorbs it */
+.tb-right { flex: none; }                         /* controls keep their size — no scrollbar */
+.tb-left .btn { flex: none; }
 .brand {
-  display: inline-flex; align-items: center; gap: 7px;
+  display: inline-flex; align-items: center; gap: 7px; flex: none;
   font-weight: 700; font-size: 14px; letter-spacing: .2px;
   padding-right: 4px; color: var(--text);
 }
 .brand .ic { color: var(--accent); }
 .doc-name {
-  color: var(--muted); font-size: 12px;
+  color: var(--muted); font-size: 12px; flex: 1 1 auto; min-width: 0;
   max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .vr { width: 1px; height: 24px; background: var(--border); flex: none; }
@@ -149,6 +151,9 @@ body { display: flex; flex-direction: column; }
 #swatches { display: inline-flex; gap: 4px; }
 .swatch { width: 22px; height: 22px; border-radius: 6px; border: 2px solid transparent; cursor: pointer; }
 .swatch.active { border-color: #fff; box-shadow: 0 0 0 1px var(--border); }
+#note-colors { display: inline-flex; gap: 6px; align-items: center; }
+.note-swatch { width: 22px; height: 22px; border-radius: 6px; border: 2px solid transparent; cursor: pointer; box-shadow: 0 1px 3px rgba(0,0,0,.35); }
+.note-swatch.active { border-color: #fff; box-shadow: 0 0 0 1px var(--border); }
 #color { width: 30px; height: 28px; padding: 0; border: 1px solid var(--border); border-radius: 6px; background: none; cursor: pointer; }
 .prop { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; }
 .prop input[type=range] { width: 96px; accent-color: var(--accent); }
@@ -224,6 +229,16 @@ body { display: flex; flex-direction: column; }
 }
 .page .textbox-grip { border-radius: 3px; cursor: nwse-resize; }
 .page .textbox-move { border-radius: 50%; cursor: move; }
+
+/* inline sticky-note editor (fixed box, wraps like the rendered note) */
+.page .note-edit {
+  position: absolute; z-index: 6; margin: 0;
+  border: none; border-radius: 2px; box-sizing: border-box;
+  box-shadow: 0 3px 12px rgba(0,0,0,.35);
+  color: #2b2b2b; font-family: system-ui, -apple-system, sans-serif;
+  line-height: 1.32; resize: none; overflow: hidden; outline: none;
+  white-space: pre-wrap; word-break: break-word;
+}
 
 /* delete (✕) button on a selected image */
 .page .img-del {

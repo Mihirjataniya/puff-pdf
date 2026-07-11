@@ -3,7 +3,7 @@
 // undo/redo, clear). Text-snap highlight, text box, brush, eraser: Stage 3.
 
 import * as pdfjsLib from "../lib/pdf.min.mjs";
-import { drawAnnotation, hitTestAnnot, cssFontFamily, defaultControl } from "./annots.js";
+import { drawAnnotation, hitTestAnnot, cssFontFamily, defaultControl, NOTE, NOTE_COLORS } from "./annots.js";
 import { exportAnnotatedPdf } from "./exporter.js";
 import { ocrCanvas, setOcrProgress } from "./ocr.js";
 
@@ -34,6 +34,7 @@ const state = {
   opacity: 1.0,
   polyShape: "triangle", // active shape for the "poly" tool
   fontFamily: "sans",    // text-box font
+  noteColor: NOTE_COLORS[0], // sticky-note background
   hasText: true,
   ocrRunning: false,
   ocrCancel: false,
@@ -48,6 +49,7 @@ const state = {
 };
 
 const HANDLE_PX = 8; // on-screen size of resize handles
+const ROT_OFFSET = 24; // unit-space gap from an image's top edge to its rotate knob
 let activeEdit = null; // live text-editor hook: { refresh } while a box is being typed
 
 const SWATCHES = ["#e11d48", "#f59e0b", "#22c55e", "#3b82f6", "#a855f7", "#111827", "#ffffff"];
@@ -76,6 +78,7 @@ const el = {
   pageReadout: document.getElementById("page-readout"),
   toast: document.getElementById("toast"),
   swatches: document.getElementById("swatches"),
+  noteColors: document.getElementById("note-colors"),
   color: document.getElementById("color"),
   width: document.getElementById("width"),
   opacity: document.getElementById("opacity"),
@@ -91,9 +94,9 @@ const TOOL_LABELS = {
   select: "Select", pen: "Pen", brush: "Brush", hltext: "Highlight text",
   hlfree: "Highlighter", line: "Line", arrow: "Arrow", dblarrow: "Double arrow",
   rect: "Rectangle", rrect: "Rounded rect", ellipse: "Ellipse", text: "Text",
-  image: "Image", eraser: "Eraser",
+  image: "Image", eraser: "Eraser", note: "Sticky note",
 };
-const NO_WIDTH_TOOLS = new Set(["hltext", "eraser", "image"]);
+const NO_WIDTH_TOOLS = new Set(["hltext", "eraser", "image", "note"]);
 
 // ---------- tiny utils ----------
 let toastTimer = null;
@@ -463,14 +466,16 @@ class PageView {
 
   onDown(e) {
     if (imageMenuEl) closeImageMenu();
-    // a freshly placed / selected image can be moved or resized under ANY tool
-    if (state.selected && state.selected.pv === this && state.selected.annot.type === "image") {
+    // a freshly placed / selected image or note can be moved or resized under ANY tool
+    if (state.selected && state.selected.pv === this &&
+        (state.selected.annot.type === "image" || state.selected.annot.type === "note")) {
       if (this.tryGrabSelection(e)) return;
     }
     if (state.tool === "hltext") return;                 // native text selection
     if (state.tool === "select") { this.selectDown(e); return; }
     if (state.tool === "eraser") { this.eraseAt(e); return; }
     if (state.tool === "image") { this.imageDown(e); return; }
+    if (state.tool === "note") { this.noteDown(e); return; }
     if (state.tool === "text") {
       if (this.tryGrabSelection(e)) return;              // move/resize the selected text box
       // clicking an existing text box selects it (single = move, double = edit); empty = new box
@@ -579,6 +584,12 @@ class PageView {
     const s = effectiveScale();
     const a = state.selected.annot;
     const h = hitHandle(a, p, (HANDLE_PX + 5) / s);
+    if (h === "rot") {
+      this.drawCanvas.setPointerCapture(e.pointerId);
+      const b = annotBBox(a), cx = b.x + b.w / 2, cy = b.y + b.h / 2;
+      state.drag = { mode: "rotate", origBox: b, baseRot: a.rot || 0, grabAng: Math.atan2(p.y - cy, p.x - cx), before: snapshotGeom(a) };
+      return true;
+    }
     if (h) {
       this.drawCanvas.setPointerCapture(e.pointerId);
       state.drag = { mode: "resize", handle: h, origBox: annotBBox(a), before: snapshotGeom(a) };
@@ -619,6 +630,11 @@ class PageView {
     if (state.drag.mode === "move") {
       translateAnnot(state.selected.annot, p.x - state.drag.last.x, p.y - state.drag.last.y);
       state.drag.last = p;
+    } else if (state.drag.mode === "rotate") {
+      const b = state.drag.origBox, cx = b.x + b.w / 2, cy = b.y + b.h / 2;
+      let rot = state.drag.baseRot + (Math.atan2(p.y - cy, p.x - cx) - state.drag.grabAng);
+      if (e.shiftKey) rot = Math.round(rot / (Math.PI / 12)) * (Math.PI / 12);   // snap to 15°
+      state.selected.annot.rot = rot;
     } else {
       resizeAnnot(state.selected.annot, state.drag, p);
     }
@@ -950,10 +966,97 @@ class PageView {
     });
   }
 
+  // Sticky-note tool: click a note to select/move it, else drop a new note here.
+  noteDown(e) {
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    if (this.tryGrabSelection(e)) return;                // grab handles/body of the selected note
+    const p = this.toUnit(e);
+    const tol = 6 / effectiveScale();
+    const hit = [...this.annots].reverse().find((a) => a.type === "note" && bboxContains(annotBBox(a), p, tol));
+    if (hit) {
+      state.selected = { pv: this, annot: hit };
+      state.drag = { mode: "move", last: p, before: snapshotGeom(hit) };
+      this.drawCanvas.setPointerCapture(e.pointerId);
+      this.redraw();
+      return;
+    }
+    if (state.selected) { const pv = state.selected.pv; state.selected = null; state.drag = null; pv.redraw(); }
+    const vp = unitSizeOf(this);
+    const x = Math.max(0, Math.min(p.x, vp.w - NOTE.W));
+    const y = Math.max(0, Math.min(p.y, vp.h - NOTE.H));
+    const annot = { id: newId(), page: this.pageNum, type: "note", x, y, w: NOTE.W, h: NOTE.H, text: "", color: state.noteColor, opacity: 1 };
+    this.editNote(annot, true);
+  }
+
+  // Inline sticky-note editor: a fixed-size wrapping textarea styled like the note.
+  // `isNew` → commit as an add on keep; otherwise swap the existing note.
+  editNote(annot, isNew) {
+    let idx = -1;
+    if (!isNew) {
+      idx = this.annots.indexOf(annot);
+      if (idx < 0) return;
+      this.annots.splice(idx, 1);        // hide the original while editing
+    }
+    state.selected = null; state.drag = null;
+    this.redraw();
+
+    const place = () => {
+      const s = effectiveScale();
+      ta.style.left = annot.x * s + "px";
+      ta.style.top = annot.y * s + "px";
+      ta.style.width = annot.w * s + "px";
+      ta.style.height = annot.h * s + "px";
+      ta.style.fontSize = NOTE.FONT * s + "px";
+      ta.style.padding = NOTE.PAD * s + "px";
+    };
+    const ta = document.createElement("textarea");
+    ta.className = "note-edit";
+    ta.value = annot.text || "";
+    ta.style.background = annot.color;
+    place();
+    this.root.appendChild(ta);
+
+    let done = false;
+    const finish = (keep) => {
+      if (done) return;
+      done = true;
+      ta.removeEventListener("blur", onBlur);
+      const text = ta.value;
+      ta.remove();
+      if (keep && text.trim()) {
+        const updated = { ...annot, text };
+        if (isNew) {
+          commit({ added: [{ pv: this, annot: updated }], removed: [] });
+        } else {
+          this.annots.splice(idx, 0, updated);
+          state.history.push({ added: [{ pv: this, annot: updated }], removed: [{ pv: this, annot }] });
+          state.redo.length = 0;
+          scheduleSave();
+        }
+        state.selected = { pv: this, annot: updated };
+      } else if (!isNew) {
+        this.annots.splice(idx, 0, annot); // restore untouched original
+      }
+      this.redraw();
+    };
+    const onBlur = () => finish(true);
+    ta.addEventListener("keydown", (ev) => {
+      ev.stopPropagation();
+      if (ev.key === "Escape") { ev.preventDefault(); finish(false); }
+    });
+    requestAnimationFrame(() => {
+      ta.focus();
+      if (annot.text) ta.select();
+      ta.addEventListener("blur", onBlur);
+    });
+  }
+
   onDblClick(e) {
     if (state.tool === "hltext") return;
     const p = this.toUnit(e);
     const tol = 6 / effectiveScale();
+    const hitNote = [...this.annots].reverse().find((a) => a.type === "note" && bboxContains(annotBBox(a), p, tol));
+    if (hitNote) { e.preventDefault(); this.editNote(hitNote, false); return; }
     const hitImg = [...this.annots].reverse().find((a) => a.type === "image" && bboxContains(annotBBox(a), p, tol));
     if (hitImg) {
       e.preventDefault();
@@ -997,8 +1100,9 @@ class PageView {
       const a = state.selected.annot;
       const b = ensureImgDelBtn();
       if (b.parentNode !== this.root) this.root.appendChild(b);
-      b.style.left = ((a.x + a.w) * s + 4) + "px";
-      b.style.top = (a.y * s - 24) + "px";
+      const ne = getHandles(a).find((h) => h.id === "ne") || { x: a.x + a.w, y: a.y };
+      b.style.left = (ne.x * s + 4) + "px";
+      b.style.top = (ne.y * s - 24) + "px";
     } else if (imgDelBtn && imgDelBtn.parentNode === this.root) {
       hideImgDelBtn();
     }
@@ -1746,6 +1850,11 @@ function setTool(tool) {
   el.toolName.textContent = tool === "poly" ? shape[0].toUpperCase() + shape.slice(1) : (TOOL_LABELS[tool] || "");
   el.propWidth.classList.toggle("hidden", NO_WIDTH_TOOLS.has(tool));
   el.propFont.classList.toggle("hidden", tool !== "text");
+  // sticky-note tool swaps the pen palette for the note-colour palette
+  const isNote = tool === "note";
+  if (el.noteColors) el.noteColors.classList.toggle("hidden", !isNote);
+  el.swatches.classList.toggle("hidden", isNote);
+  el.color.classList.toggle("hidden", isNote);
 
   // sync the Shapes rail button (it stands in for all shape tools)
   const shapesBtn = document.getElementById("btn-shapes");
@@ -1859,7 +1968,7 @@ function mergeLineRects(qs) {
 
 // ---------- selection / move / resize geometry (unit space) ----------
 function annotBBox(a) {
-  if (a.type === "image") return { x: a.x, y: a.y, w: a.w || 0, h: a.h || 0 };
+  if (a.type === "image" || a.type === "note") return { x: a.x, y: a.y, w: a.w || 0, h: a.h || 0 };
   if (a.type === "hltext") {
     const rs = a.rects || [];
     if (!rs.length) return { x: 0, y: 0, w: 0, h: 0 };
@@ -1896,7 +2005,19 @@ function getHandles(a) {
   if (ENDPOINT_SHAPES.has(a.type)) {
     return [{ id: "p0", x: a.points[0].x, y: a.points[0].y }, { id: "p1", x: a.points[1].x, y: a.points[1].y }];
   }
-  const b = annotBBox(a), mx = b.x + b.w / 2, my = b.y + b.h / 2;
+  const b = annotBBox(a);
+  if (a.type === "image") {
+    // corners + edge midpoints in the image's rotated frame, plus a rotate knob
+    const cx = b.x + b.w / 2, cy = b.y + b.h / 2, rot = a.rot || 0;
+    const co = Math.cos(rot), si = Math.sin(rot), hw = b.w / 2, hh = b.h / 2;
+    const rp = (lx, ly) => ({ x: cx + lx * co - ly * si, y: cy + lx * si + ly * co });
+    return [
+      ["nw", -hw, -hh], ["n", 0, -hh], ["ne", hw, -hh], ["e", hw, 0],
+      ["se", hw, hh], ["s", 0, hh], ["sw", -hw, hh], ["w", -hw, 0],
+      ["rot", 0, -hh - ROT_OFFSET],
+    ].map(([id, lx, ly]) => ({ id, ...rp(lx, ly) }));
+  }
+  const mx = b.x + b.w / 2, my = b.y + b.h / 2;
   return [
     { id: "nw", x: b.x, y: b.y }, { id: "n", x: mx, y: b.y }, { id: "ne", x: b.x + b.w, y: b.y },
     { id: "e", x: b.x + b.w, y: my }, { id: "se", x: b.x + b.w, y: b.y + b.h }, { id: "s", x: mx, y: b.y + b.h },
@@ -1911,7 +2032,7 @@ function hitHandle(a, p, tol) {
 
 function translateAnnot(a, dx, dy) {
   if (a.type === "hltext") { for (const r of a.rects) { r.x += dx; r.y += dy; } return; }
-  if (a.type === "text" || a.type === "image") { a.x += dx; a.y += dy; return; }
+  if (a.type === "text" || a.type === "image" || a.type === "note") { a.x += dx; a.y += dy; return; }
   for (const p of a.points) { p.x += dx; p.y += dy; }
 }
 
@@ -1924,6 +2045,24 @@ function resizeAnnot(a, drag, p) {
   if (drag.handle === "p0" || drag.handle === "p1") {   // line/arrow endpoint
     const i = drag.handle === "p0" ? 0 : 1;
     a.points[i].x = p.x; a.points[i].y = p.y;
+    return;
+  }
+  if (a.type === "image") {                             // resize in the image's own rotated frame
+    const ob = drag.origBox, rot = drag.before.rot || 0;
+    const cx = ob.x + ob.w / 2, cy = ob.y + ob.h / 2;
+    const co = Math.cos(rot), si = Math.sin(rot);
+    const dx = p.x - cx, dy = p.y - cy;
+    const lx = dx * co + dy * si, ly = -dx * si + dy * co;   // pointer in local frame (origin = center)
+    let left = -ob.w / 2, right = ob.w / 2, top = -ob.h / 2, bottom = ob.h / 2;
+    const H = drag.handle;
+    if (H.includes("w")) left = lx;
+    if (H.includes("e")) right = lx;
+    if (H.includes("n")) top = ly;
+    if (H.includes("s")) bottom = ly;
+    const nw = Math.max(1, Math.abs(right - left)), nh = Math.max(1, Math.abs(bottom - top));
+    const lcx = (left + right) / 2, lcy = (top + bottom) / 2;   // new center offset in local frame
+    const ncx = cx + (lcx * co - lcy * si), ncy = cy + (lcx * si + lcy * co);
+    a.w = nw; a.h = nh; a.x = ncx - nw / 2; a.y = ncy - nh / 2;
     return;
   }
   const ob = drag.origBox;
@@ -1942,17 +2081,17 @@ function resizeAnnot(a, drag, p) {
   } else if (a.type === "text") {
     a.x = mapX(before.x); a.y = mapY(before.y);
     a.fontSize = Math.max(6, (before.fontSize || 16) * sy);
-  } else if (a.type === "image") {
+  } else if (a.type === "note") {
     a.x = mapX(before.x); a.y = mapY(before.y);
-    a.w = Math.max(1, (before.w || 0) * sx);
-    a.h = Math.max(1, (before.h || 0) * sy);
+    a.w = Math.max(60, (before.w || 0) * sx);
+    a.h = Math.max(44, (before.h || 0) * sy);
   } else {
     a.points = before.points.map((pt) => ({ ...pt, x: mapX(pt.x), y: mapY(pt.y) }));
   }
 }
 
 function snapshotGeom(a) {
-  return JSON.parse(JSON.stringify({ points: a.points, rects: a.rects, x: a.x, y: a.y, w: a.w, h: a.h, fontSize: a.fontSize }));
+  return JSON.parse(JSON.stringify({ points: a.points, rects: a.rects, x: a.x, y: a.y, w: a.w, h: a.h, rot: a.rot, fontSize: a.fontSize, color: a.color }));
 }
 function applyGeom(a, snap) {
   if (snap.points !== undefined) a.points = JSON.parse(JSON.stringify(snap.points));
@@ -1961,7 +2100,9 @@ function applyGeom(a, snap) {
   if (snap.y !== undefined) a.y = snap.y;
   if (snap.w !== undefined) a.w = snap.w;
   if (snap.h !== undefined) a.h = snap.h;
+  if (snap.rot !== undefined) a.rot = snap.rot;
   if (snap.fontSize !== undefined) a.fontSize = snap.fontSize;
+  if (snap.color !== undefined) a.color = snap.color;
 }
 
 function commitEdit(pv, annot, before, after) {
@@ -1973,13 +2114,47 @@ function commitEdit(pv, annot, before, after) {
 
 function drawSelectionChrome(ctx, a, s) {
   const b = annotBBox(a);
+  const hs = HANDLE_PX;
+  if (a.type === "image") {
+    const cx = (b.x + b.w / 2) * s, cy = (b.y + b.h / 2) * s, rot = a.rot || 0;
+    ctx.save();
+    ctx.strokeStyle = "#3b82f6";
+    ctx.lineWidth = 1;
+    ctx.translate(cx, cy);
+    ctx.rotate(rot);
+    ctx.setLineDash([4, 3]);
+    ctx.strokeRect(-b.w / 2 * s, -b.h / 2 * s, b.w * s, b.h * s);
+    ctx.setLineDash([]);
+    ctx.beginPath();                                  // stem from top edge to the rotate knob
+    ctx.moveTo(0, -b.h / 2 * s);
+    ctx.lineTo(0, (-b.h / 2 - ROT_OFFSET) * s);
+    ctx.stroke();
+    ctx.restore();
+    for (const h of getHandles(a)) {
+      if (h.id === "rot") {
+        ctx.beginPath();
+        ctx.arc(h.x * s, h.y * s, hs / 2 + 1, 0, Math.PI * 2);
+        ctx.fillStyle = "#3b82f6";
+        ctx.fill();
+        ctx.strokeStyle = "#fff";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      } else {
+        ctx.fillStyle = "#fff";
+        ctx.strokeStyle = "#3b82f6";
+        ctx.lineWidth = 1;
+        ctx.fillRect(h.x * s - hs / 2, h.y * s - hs / 2, hs, hs);
+        ctx.strokeRect(h.x * s - hs / 2, h.y * s - hs / 2, hs, hs);
+      }
+    }
+    return;
+  }
   ctx.save();
   ctx.strokeStyle = "#3b82f6";
   ctx.lineWidth = 1;
   ctx.setLineDash([4, 3]);
   ctx.strokeRect(b.x * s, b.y * s, b.w * s, b.h * s);
   ctx.setLineDash([]);
-  const hs = HANDLE_PX;
   for (const h of getHandles(a)) {
     if (h.id === "pc") {
       // curve control point: a filled accent circle to distinguish it
@@ -2037,6 +2212,31 @@ function setColor(c, swatchEl) {
   if (swatchEl) swatchEl.classList.add("active");
 }
 
+function buildNoteSwatches() {
+  if (!el.noteColors) return;
+  NOTE_COLORS.forEach((c, i) => {
+    const s = document.createElement("div");
+    s.className = "note-swatch" + (i === 0 ? " active" : "");
+    s.style.background = c;
+    s.dataset.color = c;
+    s.title = "Sticky-note colour";
+    s.addEventListener("click", () => setNoteColor(c, s));
+    el.noteColors.appendChild(s);
+  });
+}
+// Set the colour for new notes; recolour the selected note too (undoable).
+function setNoteColor(c, swatchEl) {
+  state.noteColor = c;
+  document.querySelectorAll(".note-swatch").forEach((x) => x.classList.toggle("active", x === swatchEl));
+  const sel = state.selected;
+  if (sel && sel.annot.type === "note") {
+    const before = snapshotGeom(sel.annot);
+    sel.annot.color = c;
+    commitEdit(sel.pv, sel.annot, before, snapshotGeom(sel.annot));
+    sel.pv.redraw();
+  }
+}
+
 function wireToolbar() {
   document.getElementById("btn-open").addEventListener("click", () => el.fileInput.click());
   const splitBtn = document.getElementById("btn-split");
@@ -2060,6 +2260,57 @@ function wireToolbar() {
   document.getElementById("btn-export").addEventListener("click", exportPdf);
   document.getElementById("btn-ocr").addEventListener("click", ocrCurrentPage);
   document.getElementById("btn-ocr-all").addEventListener("click", ocrAllPages);
+}
+
+// ---------- clipboard: copy / cut / paste / duplicate ----------
+let clipboardAnnot = null;   // deep-cloned annotation (no id/_img)
+let pasteRun = 0;            // successive pastes cascade so they don't stack
+const PASTE_STEP = 16;       // unit-space offset per paste/duplicate
+
+// A fresh copy of `src` on `pv`, offset by (dx,dy), added + selected (undoable).
+function addAnnotCopy(pv, src, dx, dy) {
+  const annot = JSON.parse(JSON.stringify(src)); // _img is non-enumerable → dropped, re-decoded from src
+  annot.id = newId();
+  annot.page = pv.pageNum;
+  translateAnnot(annot, dx, dy);
+  commit({ added: [{ pv, annot }], removed: [] });
+  if (annot.type === "image") ensureImage(annot, () => pv.redraw());
+  const prev = state.selected;
+  state.selected = { pv, annot };
+  state.drag = null;
+  if (prev && prev.pv !== pv) prev.pv.redraw();
+  pv.redraw();
+  return annot;
+}
+
+function copySelection() {
+  if (!state.selected) return;
+  clipboardAnnot = JSON.parse(JSON.stringify(state.selected.annot));
+  pasteRun = 0;
+}
+
+function cutSelection() {
+  if (!state.selected) return;
+  copySelection();
+  const { pv, annot } = state.selected;
+  pv.annots = pv.annots.filter((a) => a !== annot);
+  commit({ added: [], removed: [{ pv, annot }] });
+  state.selected = null; state.drag = null;
+  pv.redraw();
+}
+
+function pasteClipboard() {
+  if (!clipboardAnnot) return;
+  const pv = currentPageView();
+  if (!pv) return;
+  pasteRun++;
+  addAnnotCopy(pv, clipboardAnnot, PASTE_STEP * pasteRun, PASTE_STEP * pasteRun);
+}
+
+function duplicateSelection() {
+  if (!state.selected) return;
+  const { pv, annot } = state.selected;
+  addAnnotCopy(pv, annot, PASTE_STEP, PASTE_STEP);
 }
 
 function wireKeyboard() {
@@ -2086,8 +2337,12 @@ function wireKeyboard() {
     else if (mod && (e.key.toLowerCase() === "y" || (e.key.toLowerCase() === "z" && e.shiftKey))) { e.preventDefault(); redo(); }
     else if (mod && e.key.toLowerCase() === "s") { e.preventDefault(); saveAnnots(true); }
     else if (mod && e.key.toLowerCase() === "e") { e.preventDefault(); exportPdf(); }
+    else if (mod && e.key.toLowerCase() === "c" && state.selected) { e.preventDefault(); copySelection(); }
+    else if (mod && e.key.toLowerCase() === "x" && state.selected) { e.preventDefault(); cutSelection(); }
+    else if (mod && e.key.toLowerCase() === "d" && state.selected) { e.preventDefault(); duplicateSelection(); }
+    else if (mod && e.key.toLowerCase() === "v" && clipboardAnnot) { e.preventDefault(); pasteClipboard(); }
     else if (!mod) {
-      const map = { p: "pen", b: "brush", h: "hltext", m: "hlfree", l: "line", a: "arrow", r: "rect", o: "ellipse", t: "text", i: "image", e: "eraser", v: "select" };
+      const map = { p: "pen", b: "brush", h: "hltext", m: "hlfree", l: "line", a: "arrow", r: "rect", o: "ellipse", t: "text", i: "image", n: "note", e: "eraser", v: "select" };
       const t = map[e.key.toLowerCase()];
       if (t) {
         // in split view the tool is shared: let the shell switch every pane
@@ -2276,6 +2531,7 @@ function wireShapesFlyout() {
 
 function boot() {
   buildSwatches();
+  buildNoteSwatches();
   wireToolbar();
   wireFileEntry();
   wireKeyboard();

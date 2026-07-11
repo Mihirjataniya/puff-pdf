@@ -33,6 +33,7 @@
       <symbol id="i-text" viewBox="0 0 24 24"><polyline points="4 7 4 4 20 4 20 7" /> <line x1="9" x2="15" y1="20" y2="20" /> <line x1="12" x2="12" y1="4" y2="20" /></symbol>
       <symbol id="i-eraser" viewBox="0 0 24 24"><path d="m7 21-4.3-4.3c-1-1-1-2.5 0-3.4l9.6-9.6c1-1 2.5-1 3.4 0l5.6 5.6c1 1 1 2.5 0 3.4L13 21" /> <path d="M22 21H7" /> <path d="m5 11 9 9" /></symbol>
       <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2" /> <circle cx="9" cy="9" r="2" /> <path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21" /></symbol>
+      <symbol id="i-note" viewBox="0 0 24 24"><path d="M4 4h16v11l-5 5H4z" /> <path d="M20 14.5h-5.5V20" /></symbol>
 
       <symbol id="i-dblarrow" viewBox="0 0 24 24"><path d="M3 12h18"/><path d="M3 12l4-4M3 12l4 4"/><path d="M21 12l-4-4M21 12l-4 4"/></symbol>
       <symbol id="i-rrect" viewBox="0 0 24 24"><rect x="4" y="6" width="16" height="12" rx="4"/></symbol>
@@ -111,6 +112,7 @@
       <div class="rail-sep"></div>
       <button class="tb-tool" data-tool="text"   data-tip="Text box — click on the page, then type (T)"><svg class="ic"><use href="#i-text"/></svg></button>
       <button class="tb-tool" data-tool="image"  data-tip="Image — click the page to add a picture (or drop one in). Drag/resize with the handles; double-click to replace or delete (I)"><svg class="ic"><use href="#i-image"/></svg></button>
+      <button class="tb-tool" data-tool="note"   data-tip="Sticky note — click the page to drop a note, then type. Pick a colour in the bar; drag/resize with the handles; double-click to edit (N)"><svg class="ic"><use href="#i-note"/></svg></button>
       <button class="tb-tool" data-tool="eraser" data-tip="Eraser — click or drag over marks to remove (E)"><svg class="ic"><use href="#i-eraser"/></svg></button>
 
       <div class="rail-grow"></div>
@@ -151,6 +153,7 @@
         <span class="prop-sep"></span>
         <div id="swatches"></div>
         <input type="color" id="color" value="#e11d48" data-tip="Custom color" />
+        <div id="note-colors" class="hidden"></div>
         <label class="prop" id="prop-width"><span>Size</span><input type="range" id="width" min="1" max="40" value="3" /></label>
         <label class="prop" id="prop-opacity"><span>Opacity</span><input type="range" id="opacity" min="10" max="100" value="100" /></label>
         <label class="prop hidden" id="prop-font"><span class="font-ic">A</span>
