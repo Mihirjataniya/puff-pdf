@@ -87,4 +87,16 @@ lib/               pdf.js (render + worker), pdf-lib (export)
 
 ## Data / privacy
 Rendering and drawing are fully local. Saved markup lives in the browser's
-extension storage. Nothing is uploaded.
+extension storage. Nothing is uploaded. Full policy: [PRIVACY.md](PRIVACY.md).
+
+## Third-party / minified sources (for reviewers)
+The `lib/` folder contains **unmodified upstream builds** of open-source
+libraries — no custom bundling or transpilation is applied to them:
+
+- `lib/pdf.min.mjs`, `lib/pdf.worker.min.mjs` — [PDF.js](https://github.com/mozilla/pdf.js) (Apache-2.0)
+- `lib/pdf-lib.min.js` — [pdf-lib](https://github.com/Hopding/pdf-lib) (MIT)
+- `lib/tesseract/` — [Tesseract.js](https://github.com/naptha/tesseract.js) (Apache-2.0)
+
+All first-party code (`background.js`, `popup.js`, `src/*.js`) is plain,
+unminified, human-readable JavaScript — no build step is required to run the
+extension from source.
